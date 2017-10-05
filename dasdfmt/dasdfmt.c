@@ -698,7 +698,8 @@ static void set_geo(dasdfmt_info_t *info, unsigned int *cylinders,
  * Set VTOC label information
  */
 static void set_label(dasdfmt_info_t *info, volume_label_t *vlabel,
-		      format_data_t *p, unsigned int cylinders)
+		      format_data_t *p, unsigned int devno,
+		      unsigned int cylinders)
 {
 	char inp_buffer[5];
 
@@ -724,8 +725,8 @@ static void set_label(dasdfmt_info_t *info, volume_label_t *vlabel,
 		if (!info->labelspec && !info->keep_volser) {
 			char buf[7];
 
-			sprintf(buf, "0X%04x", info->dasd_info.devno);
-			check_volser(buf, info->dasd_info.devno);
+			sprintf(buf, "0X%04x", devno);
+			check_volser(buf, devno);
 			vtoc_volume_label_set_volser(vlabel, buf);
 		}
 
@@ -1687,7 +1688,8 @@ int main(int argc, char *argv[])
 		ERRMSG_EXIT(EXIT_MISUSE, "%s: %s\n", prog_name, str);
 
 	set_geo(&info, &cylinders, &heads);
-	set_label(&info, &vlabel, &format_params, cylinders);
+	set_label(&info, &vlabel, &format_params,
+		  info.dasd_info.devno, cylinders);
 
 	if (info.check)
 		check_disk_format(&info, info.dasd_info.format,

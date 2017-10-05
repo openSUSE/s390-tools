@@ -331,7 +331,7 @@ static unsigned int recs_per_track(struct dasd_eckd_characteristics *rdc,
  * messages depending on the content of cdata.
  */
 static void evaluate_format_error(dasdfmt_info_t *info, format_check_t *cdata,
-				  unsigned int heads)
+				  unsigned int format, unsigned int heads)
 {
 	struct dasd_eckd_characteristics *rdc;
 	/* Special blocksize values of the first 3 records of trk 0 of cyl 0 */
@@ -353,7 +353,7 @@ static void evaluate_format_error(dasdfmt_info_t *info, format_check_t *cdata,
 	 * Also, reading record zero will never happen. If the record in error
 	 * is 0 nonetheless, the device is not formatted at all as well!
 	 */
-	if ((info->dasd_info.format == DASD_FORMAT_NONE && mode != QUICK) ||
+	if ((format == DASD_FORMAT_NONE && mode != QUICK) ||
 	    cdata->rec == 0) {
 		ERRMSG("WARNING: The specified device is not "
 		       "formatted at all.\n");
@@ -526,12 +526,12 @@ static void get_blocksize(int fd, unsigned int *blksize)
 /*
  * Check whether a specified blocksize matches the blocksize of the device
  */
-static void check_blocksize(dasdfmt_info_t *info, unsigned int blksize)
+static void check_blocksize(dasdfmt_info_t *info, unsigned int format,
+			    unsigned int blksize)
 {
 	unsigned int dev_blksize;
 
-	if (!info->blksize_specified ||
-	    info->dasd_info.format == DASD_FORMAT_NONE)
+	if (!info->blksize_specified || format == DASD_FORMAT_NONE)
 		return;
 
 	get_blocksize(filedes, &dev_blksize);
@@ -546,25 +546,23 @@ static void check_blocksize(dasdfmt_info_t *info, unsigned int blksize)
  * Check whether a specified layout matches the layout
  * a device is formatted with.
  */
-static void check_layout(dasdfmt_info_t *info, unsigned int intensity)
+static void check_layout(dasdfmt_info_t *info, unsigned int format,
+			 unsigned int intensity)
 {
 	char layout[4];
 
-	if (!info->layout_specified ||
-	    info->dasd_info.format == DASD_FORMAT_NONE)
+	if (!info->layout_specified || format == DASD_FORMAT_NONE)
 		return;
 
-	if ((intensity & DASD_FMT_INT_COMPAT) &&
-	    info->dasd_info.format == DASD_FORMAT_CDL)
+	if ((intensity & DASD_FMT_INT_COMPAT) && format == DASD_FORMAT_CDL)
 		return;
 
-	if (!(intensity & DASD_FMT_INT_COMPAT) &&
-	    info->dasd_info.format == DASD_FORMAT_LDL)
+	if (!(intensity & DASD_FMT_INT_COMPAT) && format == DASD_FORMAT_LDL)
 		return;
 
-	if (info->dasd_info.format == DASD_FORMAT_CDL)
+	if (format == DASD_FORMAT_CDL)
 		sprintf(layout, "CDL");
-	if (info->dasd_info.format == DASD_FORMAT_LDL)
+	if (format == DASD_FORMAT_LDL)
 		sprintf(layout, "LDL");
 
 	ERRMSG_EXIT(EXIT_FAILURE, "WARNING: Device is formatted with a "
@@ -797,8 +795,9 @@ static format_check_t check_track_format(dasdfmt_info_t *info, format_data_t *p)
 /*
  * Either do the actual format or check depending on the check-value.
  */
-static int process_tracks(dasdfmt_info_t *info, unsigned int cylinders,
-			  unsigned int heads, format_data_t *format_params)
+static int process_tracks(dasdfmt_info_t *info, unsigned int format,
+			  unsigned int cylinders, unsigned int heads,
+			  format_data_t *format_params)
 {
 	format_check_t cdata = { .expect = {0}, 0};
 	format_data_t step = *format_params;
@@ -823,7 +822,8 @@ static int process_tracks(dasdfmt_info_t *info, unsigned int cylinders,
 			if (cdata.result) {
 				cyl = cur_trk / heads + 1;
 				draw_progress(info, cyl, cylinders, 1);
-				evaluate_format_error(info, &cdata, heads);
+				evaluate_format_error(info, &cdata,
+						      format, heads);
 				break;
 			}
 		} else {
@@ -851,7 +851,8 @@ static int process_tracks(dasdfmt_info_t *info, unsigned int cylinders,
 /*
  * This function checks the format of the entire disk.
  */
-static void check_disk_format(dasdfmt_info_t *info, unsigned int cylinders,
+static void check_disk_format(dasdfmt_info_t *info, unsigned int format,
+			      unsigned int cylinders,
 			      unsigned int heads, format_data_t *check_params)
 {
 	check_params->start_unit = 0;
@@ -864,21 +865,21 @@ static void check_disk_format(dasdfmt_info_t *info, unsigned int cylinders,
 		return;
 	}
 
-	check_blocksize(info, check_params->blksize);
-	check_layout(info, check_params->intensity);
+	check_blocksize(info, format, check_params->blksize);
+	check_layout(info, format, check_params->intensity);
 
 	/*
 	 * If no layout was specified, set the intensity
 	 * according to what the layout seems to be.
 	 */
 	if (!info->layout_specified) {
-		if (info->dasd_info.format == DASD_FORMAT_CDL)
+		if (format == DASD_FORMAT_CDL)
 			check_params->intensity |= DASD_FMT_INT_COMPAT;
-		else if (info->dasd_info.format == DASD_FORMAT_LDL)
+		else if (format == DASD_FORMAT_LDL)
 			check_params->intensity &= ~DASD_FMT_INT_COMPAT;
 	}
 
-	if (process_tracks(info, cylinders, heads, check_params)) {
+	if (process_tracks(info, format, cylinders, heads, check_params)) {
 		ERRMSG_EXIT(EXIT_FAILURE, "Use --mode=full to perform a "
 			    "clean format.\n");
 	}
@@ -1157,8 +1158,9 @@ static void dasdfmt_write_labels(dasdfmt_info_t *info, volume_label_t *vlabel,
  * that the device is formatted to a certain extent. Otherwise the
  * process is terminated.
  */
-static void dasdfmt_find_start(dasdfmt_info_t *info, unsigned int cylinders,
-			       unsigned heads, format_data_t *format_params)
+static void dasdfmt_find_start(dasdfmt_info_t *info, unsigned int format,
+			       unsigned int cylinders, unsigned heads,
+			       format_data_t *format_params)
 {
 	format_check_t cdata;
 	unsigned int middle;
@@ -1166,14 +1168,14 @@ static void dasdfmt_find_start(dasdfmt_info_t *info, unsigned int cylinders,
 	unsigned int right = (cylinders * heads) - 1;
 	unsigned int first = left;
 
-	check_blocksize(info, format_params->blksize);
+	check_blocksize(info, format, format_params->blksize);
 
 	format_params->start_unit = 0;
 	format_params->stop_unit = 4;
 	cdata = check_track_format(info, format_params);
 
 	if (cdata.result) {
-		evaluate_format_error(info, &cdata, heads);
+		evaluate_format_error(info, &cdata, format, heads);
 		ERRMSG_EXIT(EXIT_FAILURE, "Use --mode=full to perform a "
 			    "clean format.\n");
 	}
@@ -1208,13 +1210,15 @@ static void dasdfmt_find_start(dasdfmt_info_t *info, unsigned int cylinders,
 /*
  * formats the disk cylinderwise
  */
-static void dasdfmt_format(dasdfmt_info_t *info, unsigned int cylinders,
-			   unsigned int heads, format_data_t *format_params)
+static void dasdfmt_format(dasdfmt_info_t *info, unsigned int format,
+			   unsigned int cylinders, unsigned int heads,
+			   format_data_t *format_params)
 {
-	process_tracks(info, cylinders, heads, format_params);
+	process_tracks(info, format, cylinders, heads, format_params);
 }
 
 static void dasdfmt_prepare_and_format(dasdfmt_info_t *info,
+				       unsigned int format,
 				       unsigned int cylinders,
 				       unsigned int heads, format_data_t *p)
 {
@@ -1250,7 +1254,7 @@ static void dasdfmt_prepare_and_format(dasdfmt_info_t *info,
 	/* except track 0 from standard formatting procss */
 	p->start_unit = 1;
 
-	dasdfmt_format(info, cylinders, heads, p);
+	dasdfmt_format(info, format, cylinders, heads, p);
 
 	if (info->verbosity > 0)
 		printf("formatting tracks complete...\n");
@@ -1278,8 +1282,9 @@ static void dasdfmt_prepare_and_format(dasdfmt_info_t *info,
 /*
  * This function will start the expand format process.
  */
-static void dasdfmt_expand_format(dasdfmt_info_t *info, unsigned int cylinders,
-				  unsigned int heads, format_data_t *p)
+static void dasdfmt_expand_format(dasdfmt_info_t *info, unsigned int format,
+				  unsigned int cylinders, unsigned int heads,
+				  format_data_t *p)
 {
 	if (!((info->withoutprompt) && (info->verbosity < 1)))
 		printf("Formatting the device. This may take a while "
@@ -1294,7 +1299,7 @@ static void dasdfmt_expand_format(dasdfmt_info_t *info, unsigned int cylinders,
 			    strerror(errno));
 	disk_disabled = 1;
 
-	dasdfmt_format(info, cylinders, heads, p);
+	dasdfmt_format(info, format, cylinders, heads, p);
 
 	if (info->verbosity > 0)
 		printf("Formatting tracks complete...\n");
@@ -1313,8 +1318,9 @@ static void dasdfmt_expand_format(dasdfmt_info_t *info, unsigned int cylinders,
  * This function will only format the first two tracks of a DASD.
  * The rest of the DASD is untouched and left as is.
  */
-static void dasdfmt_quick_format(dasdfmt_info_t *info, unsigned int cylinders,
-				 unsigned int heads, format_data_t *p)
+static void dasdfmt_quick_format(dasdfmt_info_t *info, unsigned int format,
+				 unsigned int cylinders, unsigned int heads,
+				 format_data_t *p)
 {
 	format_check_t cdata = { .expect = {0}, 0 };
 	format_data_t tmp = *p;
@@ -1322,7 +1328,7 @@ static void dasdfmt_quick_format(dasdfmt_info_t *info, unsigned int cylinders,
 	if (info->force) {
 		printf("Skipping format check due to --force.\n");
 	} else {
-		check_blocksize(info, p->blksize);
+		check_blocksize(info, format, p->blksize);
 
 		printf("Checking the format of selected tracks...\n");
 
@@ -1336,7 +1342,7 @@ static void dasdfmt_quick_format(dasdfmt_info_t *info, unsigned int cylinders,
 			cdata = check_track_format(info, &tmp);
 		}
 		if (cdata.result) {
-			evaluate_format_error(info, &cdata, heads);
+			evaluate_format_error(info, &cdata, format, heads);
 			ERRMSG_EXIT(EXIT_FAILURE, "Use --mode=full to perform "
 				    "a clean format.\n");
 		} else {
@@ -1366,7 +1372,7 @@ static void dasdfmt_quick_format(dasdfmt_info_t *info, unsigned int cylinders,
 }
 
 static void do_format_dasd(dasdfmt_info_t *info, char *devname,
-			   volume_label_t *vlabel,
+			   volume_label_t *vlabel, unsigned int format,
 			   format_data_t *p, unsigned int cylinders,
 			   unsigned int heads)
 {
@@ -1383,7 +1389,7 @@ static void do_format_dasd(dasdfmt_info_t *info, char *devname,
 		p->stop_unit = 1;
 		break;
 	case EXPAND: /* only the end of the disk */
-		dasdfmt_find_start(info, cylinders, heads, p);
+		dasdfmt_find_start(info, format, cylinders, heads, p);
 		p->stop_unit  = (cylinders * heads) - 1;
 		break;
 	}
@@ -1432,13 +1438,16 @@ static void do_format_dasd(dasdfmt_info_t *info, char *devname,
 
 		switch (mode) {
 		case FULL:
-			dasdfmt_prepare_and_format(info, cylinders, heads, p);
+			dasdfmt_prepare_and_format(info, format,
+						   cylinders, heads, p);
 			break;
 		case QUICK:
-			dasdfmt_quick_format(info, cylinders, heads, p);
+			dasdfmt_quick_format(info, format,
+					     cylinders, heads, p);
 			break;
 		case EXPAND:
-			dasdfmt_expand_format(info, cylinders, heads, p);
+			dasdfmt_expand_format(info, format,
+					      cylinders, heads, p);
 			break;
 		}
 
@@ -1681,10 +1690,12 @@ int main(int argc, char *argv[])
 	set_label(&info, &vlabel, &format_params, cylinders);
 
 	if (info.check)
-		check_disk_format(&info, cylinders, heads, &format_params);
+		check_disk_format(&info, info.dasd_info.format,
+				  cylinders, heads, &format_params);
 	else
 		do_format_dasd(&info, dev_filename, &vlabel,
-			       &format_params, cylinders, heads);
+			       info.dasd_info.format, &format_params,
+			       cylinders, heads);
 
 	if (close(filedes) != 0)
 		ERRMSG("%s: error during close: %s\ncontinuing...\n",

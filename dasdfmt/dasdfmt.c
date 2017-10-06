@@ -129,6 +129,10 @@ static struct util_opt opt_vec[] = {
 		.option = { "percentage", no_argument, NULL, 'Q' },
 		.desc = "Show progress in percent",
 	},
+	{
+		.option = { "yast_mode", no_argument, NULL, 'Y' },
+		.desc = "YaST mode",
+	},
 	UTIL_OPT_SECTION("MISC"),
 	{
 		.option = { "check_host_count", no_argument, NULL, 'C' },
@@ -351,7 +355,8 @@ static void evaluate_format_error(dasdfmt_info_t *info, format_check_t *cdata,
 	unsigned int kl = 0;
 	int blksize = cdata->expect.blksize;
 
-	if (info->print_progressbar || info->print_hashmarks)
+	if ((info->print_progressbar || info->print_hashmarks) &&
+	    !info->yast_mode)
 		printf("\n");
 
 	/*
@@ -758,9 +763,9 @@ static void check_hashmarks(dasdfmt_info_t *info)
 			       "using the default.\n");
 			info->hashstep = 10;
 		}
-
-		printf("Printing hashmark every %d cylinders.\n",
-		       info->hashstep);
+		if (!info->yast_mode)
+			printf("Printing hashmark every %d cylinders.\n",
+			       info->hashstep);
 	}
 }
 
@@ -1445,16 +1450,18 @@ static void do_format_dasd(dasdfmt_info_t *info, char *devname,
 			break;
 		}
 
-		printf("Finished formatting the device.\n");
+		if (!info->yast_mode)
+			printf("Finished formatting the device.\n");
 
 		if (!(info->writenolabel || mode == EXPAND))
 			dasdfmt_write_labels(info, vlabel, cylinders, heads);
 
-		printf("Rereading the partition table... ");
+		if (!info->yast_mode)
+			printf("Rereading the partition table... ");
 		if (reread_partition_table()) {
 			ERRMSG("%s: error during rereading the partition "
 			       "table: %s.\n", prog_name, strerror(errno));
-		} else {
+		} else if (!info->yast_mode) {
 			printf("ok\n");
 		}
 	}
@@ -1511,6 +1518,8 @@ void do_dasdfmt(char *dev_filename, dasdfmt_info_t *info,
 		ERRMSG_EXIT(EXIT_MISUSE, "%s: %s\n", prog_name, str);
 
 	set_geo(info, &cylinders, &heads);
+	if (info->yast_mode)
+		printf("%d\n", cylinders);
 	set_label(info, &vlabel, &format_params, cylinders);
 
 	if (info->check)
@@ -1664,6 +1673,10 @@ int main(int argc, char *argv[])
 					    "invalid. Consult the man page for "
 					    "more information.\n",
 					    prog_name, optarg);
+			break;
+		case 'Y':
+			/* YaST mode */
+			info.yast_mode = 1;
 			break;
 		case 'P':
 			max_parallel = atoi(optarg);

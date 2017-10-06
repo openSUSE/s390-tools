@@ -308,6 +308,7 @@ typedef struct dasdfmt_info {
 	int   layout_specified;
 	int   check;
 	int   procnum;
+	int   yast_mode;
 } dasdfmt_info_t;
 
 

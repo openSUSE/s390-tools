@@ -11,6 +11,7 @@
 #include <sys/sysmacros.h>
 #include <sys/time.h>
 #include <sys/utsname.h>
+#include <sys/wait.h>
 
 #include "lib/dasd_sys.h"
 #include "lib/util_opt.h"
@@ -68,6 +69,11 @@ static struct util_opt opt_vec[] = {
 		.desc = "Perform complete format check on device",
 		.flags = UTIL_OPT_FLAG_NOSHORT,
 	},
+	{
+		.option = { "max_parallel", required_argument, NULL, 'P' },
+		.desc = "Format devices in parallel",
+		.flags = UTIL_OPT_FLAG_NOLONG,
+	},
 	UTIL_OPT_SECTION("FORMAT OPTIONS"),
 	{
 		.option = { "blocksize", required_argument, NULL, 'b' },
@@ -120,7 +126,7 @@ static struct util_opt opt_vec[] = {
 		.desc = "Show a progressbar",
 	},
 	{
-		.option = { "percentage", no_argument, NULL, 'P' },
+		.option = { "percentage", no_argument, NULL, 'Q' },
 		.desc = "Show progress in percent",
 	},
 	UTIL_OPT_SECTION("MISC"),
@@ -254,7 +260,7 @@ static void draw_progress(dasdfmt_info_t *info, int cyl, unsigned int cylinders,
 
 	if (info->print_hashmarks &&
 	    (cyl / info->hashstep - hashcount) != 0) {
-		printf("#");
+		printf("%d|", info->procnum);
 		fflush(stdout);
 		hashcount++;
 	}
@@ -1533,7 +1539,8 @@ int main(int argc, char *argv[])
 	char *reqsize_param_str = NULL;
 	char *hashstep_str      = NULL;
 
-	int rc, numdev = 0, i;
+	int max_parallel = 1, running = 0;
+	int rc, numdev = 0, i, status;
 
 	/* Establish a handler for interrupt signals. */
 	signal(SIGTERM, program_interrupt_signal);
@@ -1600,7 +1607,7 @@ int main(int argc, char *argv[])
 				info.print_hashmarks = 1;
 			}
 			break;
-		case 'P':
+		case 'Q':
 			if (!(info.print_hashmarks || info.print_progressbar))
 				info.print_percentage = 1;
 			break;
@@ -1658,6 +1665,9 @@ int main(int argc, char *argv[])
 					    "more information.\n",
 					    prog_name, optarg);
 			break;
+		case 'P':
+			max_parallel = atoi(optarg);
+			break;
 		case OPT_CHECK:
 			info.check = 1;
 			break;
@@ -1707,7 +1717,33 @@ int main(int argc, char *argv[])
 		ERRMSG_EXIT(EXIT_MISUSE, "%s: No device specified!\n",
 			    prog_name);
 
-	for (i = 0; i < numdev; i++)
-		do_dasdfmt(dev_filename[i], &info, &vlabel);
-	return 0;
+	for (i = 0; i < numdev; i++) {
+		int chpid;
+		int tmp;
+
+		chpid = fork();
+		if (chpid == -1)
+			ERRMSG_EXIT(EXIT_FAILURE,
+				    "%s: Unable to create child process: %s\n",
+				    prog_name, strerror(errno));
+		if (!chpid) {
+			info.procnum = i;
+			do_dasdfmt(dev_filename[i], &info, &vlabel);
+			exit(0);
+		} else {
+			running++;
+			if (running >= max_parallel) {
+				if (wait(&tmp) > 0 && WEXITSTATUS(tmp))
+					rc = WEXITSTATUS(tmp);
+				running--;
+			}
+		}
+	}
+
+	/* wait until all formatting children have finished */
+	while(wait(&status) > 0)
+		if (WEXITSTATUS(status))
+			rc = WEXITSTATUS(status);
+
+	return rc;
 }

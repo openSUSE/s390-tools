@@ -4,9 +4,9 @@ SYSTEM_UNITS = ttyrun-getty@.service iucvtty-login@.service \
                cpacfstatsd.service cpuplugd.service \
                dumpconf.service cpi.service \
                mon_fsstatd.service mon_procd.service \
-               cio_ignore.service
+               cio_ignore.service virtsetup.service
 
-SYSTEMD_SCRIPTS = setup_cio_ignore.sh detach_disks.sh
+SYSTEMD_SCRIPTS = setup_cio_ignore.sh detach_disks.sh virtsetup.sh
 
 all:
 

@@ -1,6 +1,8 @@
 include ../common.mak
 
-SCRIPTS	= dbginfo.sh zfcpdbf scsi_logging_level cputype mkdump
+SCRIPTS	= dbginfo.sh zfcpdbf scsi_logging_level cputype mkdump \
+	dasd_reload dasdro detach_disks killcdl lgr_check zfcp_san_disc
+
 MAN_PAGES = dbginfo.sh.1 zfcpdbf.1 cputype.1
 MAN8_PAGES = mkdump.8
 

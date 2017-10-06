@@ -11,7 +11,7 @@ dasdfmt \- formatting of DASD (ECKD) disk drives.
 .br
         [-r \fIcylinder\fR] [-b \fIblksize\fR] [-l \fIvolser\fR] [-d \fIlayout\fR]
 .br
-        [-L] [-V] [-F] [-k] [-C] [-M \fImode\fR] \fIdevice\fR [\fIdevice\fR]
+        [-L] [-V] [-F] [-k] [-C] [-M \fImode\fR] [-f \fIdevice\fR] [\fIdevice\fR]
 
 .SH DESCRIPTION
 \fBdasdfmt\fR formats one or several DASD (ECKD) disk drive to prepare it
@@ -40,6 +40,10 @@ out, what it \fBwould\fR do.
 .TP
 \fB-v\fR
 Increases verbosity.
+
+.TP
+\fB-f\fR \fIdevice\fR or \fB--device\fR=\fIdevice\fR
+Specify device to format. For backwards compability only.
 
 .TP
 \fB-y\fR 

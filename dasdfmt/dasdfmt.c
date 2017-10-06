@@ -74,6 +74,10 @@ static struct util_opt opt_vec[] = {
 		.desc = "Format devices in parallel",
 		.flags = UTIL_OPT_FLAG_NOLONG,
 	},
+	{
+		.option = { "device", required_argument, NULL, 'f' },
+		.desc = "Spedify device to format",
+	},
 	UTIL_OPT_SECTION("FORMAT OPTIONS"),
 	{
 		.option = { "blocksize", required_argument, NULL, 'b' },
@@ -1596,6 +1600,10 @@ int main(int argc, char *argv[])
 				exit(1);
 			}
 			info.layout_specified = 1;
+			break;
+		case 'f':
+			get_device_name(dev_filename, numdev, optarg);
+			numdev++;
 			break;
 		case 'y':
 			info.withoutprompt = 1;

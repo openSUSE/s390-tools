@@ -7,7 +7,7 @@
 dasdfmt \- formatting of DASD (ECKD) disk drives.
 
 .SH SYNOPSIS
-\fBdasdfmt\fR [-h] [-t] [-v] [-y] [-p] [-Q] [-P] [-m \fIstep\fR]
+\fBdasdfmt\fR [-h] [-t] [-v] [-y] [-p] [-Q] [-P] [-Y] [-m \fIstep\fR]
 .br
         [-r \fIcylinder\fR] [-b \fIblksize\fR] [-l \fIvolser\fR] [-d \fIlayout\fR]
 .br
@@ -110,6 +110,11 @@ are not able to use the progress bar option -p, e.g. with a 3270
 terminal.
 .br
 The value will be at least as big as the -r or --requestsize value.
+.br
+
+.TP
+\fB-Y\fR or \fB--yast_mode\fR
+YaST mode; suppress most output.
 .br
 
 .TP

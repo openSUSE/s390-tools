@@ -170,7 +170,8 @@ TOOLS_LIBDIR    = $(INSTALLDIR)/lib/s390-tools
 ZFCPDUMP_DIR    = $(TOOLS_LIBDIR)/zfcpdump
 # Systemd support files are installed only if a directory is specified
 # for SYSTEMDSYSTEMUNITDIR (e.g. /lib/systemd/system)
-SYSTEMDSYSTEMUNITDIR =
+SYSTEMDSYSTEMUNITDIR = $(INSTALLDIR)/usr/lib/systemd/system
+SYSTEMDSYSTEMSCRIPTDIR = $(INSTALLDIR)/usr/lib/systemd/scripts
 
 INSTDIRS        = $(USRSBINDIR) $(USRBINDIR) $(BINDIR) $(LIBDIR) $(MANDIR) \
 			$(SYSCONFDIR) $(TOOLS_LIBDIR) $(TOOLS_DATADIR) \

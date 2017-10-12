@@ -1,12 +1,19 @@
 include ../common.mak
 
-SCRIPTS	= dbginfo.sh zfcpdbf scsi_logging_level
-MAN_PAGES = dbginfo.sh.1 zfcpdbf.1
+SCRIPTS	= dbginfo.sh zfcpdbf scsi_logging_level cputype mkdump \
+	dasd_reload dasdro detach_disks killcdl lgr_check zfcp_san_disc \
+	ctc_configure dasd_configure iucv_configure qeth_configure \
+	zfcp_disk_configure zfcp_host_configure
+
+MAN_PAGES = dbginfo.sh.1 zfcpdbf.1 cputype.1
+MAN8_PAGES = mkdump.8 ctc_configure.8 dasd_configure.8 iucv_configure.8 \
+             qeth_configure.8 zfcp_disk_configure.8 zfcp_host_configure.8
 
 all:
 
 install:
-	$(INSTALL) -d -m 755 $(DESTDIR)$(BINDIR) $(DESTDIR)$(MANDIR)/man1
+	$(INSTALL) -d -m 755 $(DESTDIR)$(BINDIR) $(DESTDIR)$(MANDIR)/man1 $(DESTDIR)$(MANDIR)/man8
+
 	@for i in $(SCRIPTS); \
 	do \
 		cat $$i | \
@@ -27,6 +34,11 @@ install:
 		$(DESTDIR)$(MANDIR)/man1; \
 	done
 
+	@for i in $(MAN8_PAGES); \
+	do \
+		$(INSTALL) -g $(GROUP) -o $(OWNER) -m 644 $$i \
+		$(DESTDIR)$(MANDIR)/man8; \
+	done
 clean:
 
 .PHONY: all install clean

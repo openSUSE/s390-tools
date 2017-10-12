@@ -3,11 +3,14 @@ include ../common.mak
 SYSTEM_UNITS = ttyrun-getty@.service iucvtty-login@.service \
                cpacfstatsd.service cpuplugd.service \
                dumpconf.service cpi.service \
-               mon_fsstatd.service mon_procd.service
+               mon_fsstatd.service mon_procd.service \
+               cio_ignore.service virtsetup.service
+
+SYSTEMD_SCRIPTS = setup_cio_ignore.sh detach_disks.sh virtsetup.sh
 
 all:
 
-system_units: $(SYSTEM_UNITS)
+system_units: $(SYSTEM_UNITS) $(SYSTEMD_SCRIPTS)
 
 check:
 
@@ -20,7 +23,10 @@ install: system_units
 	done
 	# For systemd install dumpconf to TOOLS_LIBDIR
 	$(INSTALL) -m 755 ../etc/init.d/dumpconf $(DESTDIR)$(TOOLS_LIBDIR)
-
+	for script in $(SYSTEMD_SCRIPTS); do \
+	  $(INSTALL) -g $(GROUP) -o $(OWNER) \
+		-m 755 $$script $(DESTDIR)$(SYSTEMDSYSTEMSCRIPTDIR) ; \
+	done
 else
 
 install:

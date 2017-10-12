@@ -167,10 +167,11 @@ int menu(void)
 	/* print config list */
 	menu_list();
 
-	if (is_zvm())
+	if (is_zvm()) {
 		printf(" \n");
 		printf("Note: VM users please use '#cp vi vmsg <input> <kernel-parameters>'\n");
 		printf(" \n");
+	}
 
 	value = menu_read();
 

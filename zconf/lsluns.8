@@ -2,62 +2,140 @@
 .\" s390-tools is free software; you can redistribute it and/or modify
 .\" it under the terms of the MIT license. See LICENSE for details.
 .\"
-.TH LSLUNS 8 "June 2008" "s390-tools"
+.TH LSLUNS 8 "2017-02-17" "s390-tools"
 .SH NAME
-lsluns \- list available LUNs
+lsluns \- list LUNs discovered in the FC SAN through zfcp, or show encryption state of
+zfcp-attached LUNs
 
 .SH SYNOPSIS
 .B lsluns
-.RB [ \-h]
-.RB [ \-v]
-.RB [ \-c
-.IR adapter id:0.0.XXXX ]
-.RB [ \-p
-.IR port number:0xXXXXXXXXXXXXXXXX ]
+.RB [\| \-c
+.IR busid \|]\ .\|.\|.
+.RB [\| \-p
+.IR wwpn \|]\ .\|.\|.
+.\" --active
+.br
+.B lsluns \-a
+.RB [\| \-c
+.IR busid \|]\ .\|.\|.
+.RB [\| \-p
+.IR wwpn \|]\ .\|.\|.
+.\" --help and --version
+.br
+.B lsluns
+.RB [\| \-h \|]
+.RB [\| \-v \|]
 
 .SH DESCRIPTION
 .PP
-.B lsluns
-does a listing of all available LUNs.
+This tool is designed for environments where all SCSI devices are attached
+through the zfcp device driver. Expect error messages in mixed environments
+such as with iSCSI.
 
-The default is to list all LUNs that are found. The listing can be
-limited by specifying an adapter or a port.
+.B lsluns
+lists all logical unit numbers (LUNs) discovered in the
+Fibre Channel (FC) Storage Area Network (SAN).
+This causes extra SAN traffic for each target port WWPN.
+
+.B lsluns -a
+shows the encryption state of the attached LUNs.
+This causes extra SAN traffic for each attached LUN.
+
+Limit the listing by specifying one or more adapters (FCP device
+bus-IDs) or target port WWPNs or both.
+
+For all other uses, such as listing attached LUNs or properties other than
+encryption, use other tools such as
+.B lszfcp \-D
+or
+.BR "lsscsi \-tv"
+or
+.BR "lszdev zfcp-lun \-ii" .
+
+.SS Details on lsluns without -a option
+
+.TP
+Prerequisite
+Discovering LUNs only makes sense for NPIV-enabled FCP devices
+without zfcp automatic LUN scan. zfcp automatic LUN scan is available
+as of kernel version 2.6.37, if not disabled with zfcp.allow_lun_scan=0.
+
+With available and enabled zfcp automatic LUN scan,
+the kernel already performs LUN discovery.
+
+.TP
+Temporary LUN Attachment
+If not attached already, lsluns temporarily attaches LUN 0
+(or if this fails the WLUN 0xc101000000000000) during runtime.
+Do not terminate lsluns with a signal. Signals interfere
+with the removal of temporarily attached LUNs.
+
+.TP
+Storage Products
+Some storage products return a peripheral device type of 31==0x1f
+with peripheral qualifier 0 in a SCSI standard INQUIRY command
+for an unmapped FCP LUN 0. Examples are: IBM Storwize products,
+including IBM V7000, IBM V840, IBM V9000, and IBM SAN Volume Controller.
+For lsluns to work with such storage products,
+you must have a host mapping on the storage, which maps some volume
+to exported FCP LUN 0x0000000000000000 (Storwize host map property "SCSI ID" 0)
+for each used FCP-device initiator WWPN. The volume can be
+a minimum-sized thin-provisioned shared stand-in volume.
 
 .SH OPTIONS
 .TP
-.B -h, --help
+.BR \-a ", " \-\-active
+Show the encryption state of the attached LUNs. Encrypted devices are indicated
+with a bracketed X immediately following the LUN number.
+.TP
+.BI \-c\  busid \fR,\ \fB\-\-ccw= busid
+Filter LUNs by adapter with the specified FCP device bus-ID. This option can be
+specified multiple times. When used in conjunction with \fB\-p\fR, only those
+LUNs are listed that also satisfy at least one of the \fB\-p\fR constraints.
+.TP
+.BI \-p\  wwpn \fR,\ \fB\-\-port= wwpn
+Filter LUNs by target port with the specified WWPN. This option can be
+specified multiple times. When used in conjunction with \fB\-c\fR, only those
+LUNs are listed that also satisfy at least one of the \fB\-c\fR constraints.
+.TP
+.BR \-h ", " \-\-help
 Print help message and exit.
 .TP
-.B -v, --version
-Display version info and exit.
-.TP
-.B -c, --ccw
-Shows LUNs for a specific adapter.
-.TP
-.B -p, --port
-Shows LUNs for a specific port.
-.TP
-.B -a, --active
-Shows all activated LUNs. In addition information is provided
-whether the LUN is encrypted or not. This is indicated with a bracketed X 
-right after the LUN number.
+.BR \-v ", " \-\-version
+Display version information and exit.
 
 .SH EXAMPLES
-.PP
-.IP "lsluns"
+.TP
+.B "lsluns"
 .RS
-Shows all available LUNs.
+Lists all LUNs discovered in the FC SAN.
 .RE
-.IP "lsluns -c 0.0.3922"
-Shows all LUNs found on adapter 0.0.3922.
-.IP "lsluns -p 0x5005123456789000"
-Shows all LUNs for port 0x5005123456789000.
-.IP "lsluns -c 0.0.3922 -p 0x5005123456789000"
-Shows all LUNs for adapter 0.0.3922 and port 0x5005123456789000.
-.IP "lsluns -a "
+.TP
+.BI "lsluns \-c " 0.0.3922
+Lists all LUNs discovered in the FC SAN on adapter \fI0.0.3922\fR.
+.TP
+.BI "lsluns \-p " 0x5005123456789000
+Lists all LUNs discovered in the FC SAN on target port
+\fI0x5005123456789000\fR.
+.TP
+.BI "lsluns \-c " 0.0.3922 " \-c " 0.0.fc00 \
+" \-p " 0x5005123456789000 " \-p " 0x5005abcdefabc000
+Lists all LUNs discovered in the FC SAN on:
+adpater \fI0.0.3922\fR and port \fI0x5005123456789000\fR,
+adapter \fI0.0.3922\fR and port \fI0x5005abcdefabc000\fR,
+adapter \fI0.0.fc00\fR and port \fI0x5005123456789000\fR, or
+adapter \fI0.0.fc00\fR and port \fI0x5005abcdefabc000\fR.
+.TP
+.B "lsluns -a"
 adapter = 0.0.3c02
         port = 0x500507630300c562
                 lun = 0x401040a200000000(X)     /dev/sg0        Disk    IBM:2107900
                 lun = 0x401040a300000000        /dev/sg1        Disk    IBM:2107900
 
-Shows all active LUNs including the information whether the device is encrypted or not.
+Shows the encryption status of attached LUNs. A bracketed X suffixed to a LUN
+indicates that the device is encrypted.
+
+.SH "SEE ALSO"
+.BR lszfcp (8),
+.BR lsscsi (8),
+.BR lszdev (8)

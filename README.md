@@ -124,7 +124,8 @@ Package contents
    - lsscm:      List information about available Storage Class Memory
                  Increments.
    - chchp:      Modify channel-path state.
-   - lsluns:     List available SCSI LUNs depending on adapter or port.
+   - lsluns:     List LUNs discovered in the FC SAN,
+                 or show encryption state of attached LUNs.
    - lszcrypt:   Show Information about zcrypt devices and configuration.
    - chzcrypt:   Modify the zcrypt configuration.
    - znetconf:   List and configure network devices for s390 network adapters.
@@ -256,13 +257,14 @@ HAVE_FUSE=0`".
 The following table provides an overview of the used libraries and
 build options:
 
-| __LIBRARY__|__BUILD OPTION__| __TOOLS__                             |
-|------------|:--------------:|:-------------------------------------:|
-| fuse       | `HAVE_FUSE`    | cmsfs-fuse, zdsfs, hmcdrvfs, zgetdump |
-| zlib       | `HAVE_ZLIB`    | zgetdump, dump2tar                    |
-| ncurses    | `HAVE_NCURSES` | hyptop                                |
-| pfm        | `HAVE_PFM`     | cpacfstats                            |
-| net-snmp   | `HAVE_SNMP`    | osasnmpd                              |
+| __LIBRARY__    |__BUILD OPTION__| __TOOLS__                             |
+|----------------|:--------------:|:-------------------------------------:|
+| fuse           | `HAVE_FUSE`    | cmsfs-fuse, zdsfs, hmcdrvfs, zgetdump |
+| zlib           | `HAVE_ZLIB`    | zgetdump, dump2tar                    |
+| ncurses        | `HAVE_NCURSES` | hyptop                                |
+| pfm            | `HAVE_PFM`     | cpacfstats                            |
+| net-snmp       | `HAVE_SNMP`    | osasnmpd                              |
+| glibc-static   | `n/a`          | zfcpdump                              |
 
 This table lists additional build or install options:
 
@@ -286,9 +288,9 @@ the different tools are provided:
   http://net-snmp.sourceforge.net
 
 * lsluns:
-  For executing the lsluns script the sg_luns command must be available.
-  The sg_luns executable is part of the SCSI generic device driver package
-  (sg3 utils/sg utils).
+  For executing the lsluns script the sg_luns and sg_inq commands must
+  be available. The sg_luns and sg_inq executables are part of the
+  SCSI generic device driver package (sg3 utils/sg utils).
 
 * ziomon tools:
   For running the ziomon tools the following tools/packages are required:

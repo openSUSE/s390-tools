@@ -1717,6 +1717,9 @@ int main(int argc, char *argv[])
 			break; /* exit loop if finished */
 	}
 
+	/* Reset the value of rc since we're going to use it again later. */
+	rc = 0;
+
 	CHECK_SPEC_MAX_ONCE(info.blksize_specified, "blocksize");
 	CHECK_SPEC_MAX_ONCE(info.labelspec, "label");
 	CHECK_SPEC_MAX_ONCE(info.writenolabel, "omit-label-writing flag");

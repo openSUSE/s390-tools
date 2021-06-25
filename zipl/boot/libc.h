@@ -12,8 +12,9 @@
 #define LIBC_H
 
 #include <stdint.h>
+#include <stddef.h>
 
-#define NULL ((void *) 0)
+#include "lib/zt_common.h"
 
 #define EPERM		 1	/* Operation not permitted */
 #define ENOENT		 2	/* No such file or directory */
@@ -42,25 +43,32 @@
 #define ENOTTY		25	/* Not a typewriter */
 
 #define MIB	(1024ULL * 1024)
+#define LINE_LENGTH 80 /* max line length printed by printf */
 
 void printf(const char *, ...);
-void sprintf(char *, const char *, ...);
+void snprintf(char *buf, unsigned long size, const char *fmt, ...);
 void *memcpy(void *, const void *, unsigned long);
 void *memmove(void *, const void *, unsigned long);
 void *memset(void *, int c, unsigned long);
 char *strcat(char *, const char *);
 int strncmp(const char *, const char *, unsigned long);
-unsigned long strtoul(const char *, char **, int);
-unsigned long ebcstrtoul(char *, char **, int);
 int strlen(const char *);
 char *strcpy(char *, const char *);
 unsigned long get_zeroed_page(void);
 void free_page(unsigned long);
 void initialize(void);
-void libc_stop(unsigned long);
+void libc_stop(unsigned long) __noreturn;
 void start(void);
 void pgm_check_handler(void);
 void pgm_check_handler_fn(void);
+void panic_notify(unsigned long reason);
+
+#define panic(reason, ...)			\
+	do {					\
+		printf(__VA_ARGS__);		\
+		panic_notify(reason);		\
+		libc_stop(reason);		\
+	} while (0)
 
 static inline int isdigit(int c)
 {
@@ -70,30 +78,6 @@ static inline int isdigit(int c)
 static inline int isspace(char c)
 {
 	return (c == 32) || (c >= 9 && c <= 13);
-}
-
-static inline int ebc_isspace(char c)
-{
-	return (c == 0x40) || (c == 0x05) || (c == 0x15) || (c == 0x25) ||
-		(c == 0x0b) || (c == 0x0c) || (c == 0x0d);
-}
-
-static inline int ebc_isdigit(char c)
-{
-	return (c >= 0xf0) && (c <= 0xf9);
-}
-
-static inline int ebc_isupper(char c)
-{
-	return (c >= 0xC1 && c <= 0xC9) || (c >= 0xD1 && c <= 0xD9) ||
-		(c >= 0xE2 && c <= 0xE9);
-}
-
-static inline  char ebc_tolower(char c)
-{
-	if (ebc_isupper(c))
-		c -= 0x40;
-	return c;
 }
 
 #endif /* LIBC_H */

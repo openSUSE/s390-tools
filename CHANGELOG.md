@@ -1,16 +1,137 @@
 Release history for s390-tools (MIT version)
 --------------------------------------------
- * __v2.12.x (20xx-xx-xx)__
+* __v2.16.x (2021-xx-xx)__
 
-  For Linux kernel version: 5.x
+  For Linux kernel version: 5.xx
+
+  Changes of existing tools:
+
+  Bug Fixes:
+  - dbginfo: add KVM data collection for server and guest - fix lszdev
+  - dbginfo: add /proc/kallsyms - refresh zVM, lscpu - fix WORKARCHIVE handling
+
+* __v2.16.0 (2021-02-19)__
+
+  For Linux kernel version: 5.10 / 5.11
+
+  Add new tool:
+  - hsci: New tool to manage HSCI (HiperSockets Converged Interfaces)
+
+  Changes of existing tools:
+  - genprotimg: Add host-key document verification support
+  - genprotimg: boot: Make boot loader -march=z900 compatible
+  - libekmfweb: Make install directory for shared libraries configurable
+  - lsdasd: Add FC Endpoint Security information
+  - make: Add address sanitizer support
+  - netboot: Add version information to scripts
+  - netboot: Bump busybox version in pxelinux.0 build
+  - zdev: Add FC Endpoint Security information for DASD devices
+  - zdev: Add build option to update initial RAM-disk by default
+  - zkey-ekmfweb: Avoid sequence number clash when generating keys
+  - zkey/zkey-ekmfweb: Install KMS plugins into configurable location
+  - zkey: Add support to store LUKS2 dummy passphrase in key repository
+
+  Bug Fixes:
+  - dasdfmt: Fix segfault when an incorrect option is specified
+  - genprotimg: Fix several build issues
+  - genprotimg: Require argument for 'ramdisk' and 'parmfile' options
+  - zcryptstats: Fix handling of partial results with many domains
+  - zfcpdbf: Deal with crash 7.2.9 change in caller name formatting
+  - zipl/boot: Fix memory use after free in stage2
+  - zipl/boot: Fix potential heap overflow in stage2
+  - zipl: Fix reading 4k disk's geometry
+
+* __v2.15.1 (2020-10-28)__
+
+  For Linux kernel version: 5.9
+
+  Changes of existing tools:
+  - lsstp: Improve wording and fix typos in man page
+  - zkey: Ensure zkey and friends are skipped with HAVE_OPENSSL=0
+  - zkey: Add library versioning for libekmfweb and zkey-ekmfweb
+  - libutil: Add function to determine base device of a partition block device
+
+  Bug Fixes:
+  - dasdfmt: Fix bad file descriptor error when running on symlinks
+  - libdasd: Fix dasd_get_host_access_count()
+  - zipl: Fix multivolume dump
+  - zgetdump: Fix device node determination via sysfs to work with multivolume again
+  - genprotimg/boot: Fix build by disabling SSP
+  - zipl/boot: Fix build by disabling SSP
+
+* __v2.15.0 (2020-10-15)__
+
+  For Linux kernel version: 5.9
+
+  Add new tool:
+  - lsstp: A small utility to display the Server Time Protocol (STP) information present in sysfs
+
+  Changes of existing tools:
+  - dumpconf: support NVMe dump/reipl device
+  - ipl_tools: support clear attribute for nvme re-IPL
+  - zcrypt: Support new config state with lszcrypt and chzcrypt
+  - zkey: Add support for key management system plugins
+        including the KMS commands:
+            bind, unbind, info, configure, rencipher, list, import, refresh
+  - zkey: Add EKMFWeb support to remotely generate secure keys
+  - libekmfweb: Add new EKMFWeb client library
+  - libutil: Add util_file_read_va()
+  - libutil: Add util_file_read_i()/util_file_read_ui()
+
+  Bug Fixes:
+  - cpumf: Fix version and help printout when CPUMF is not installed
+  - ziomon/ziorep_printers: fix virtual adapter CSV output
+  - zipl: Fix Error when title is not the first field in BLS file
+
+
+* __v2.14.0 (2020-08-21)__
+
+  For Linux kernel version: 5.7 / 5.8
+
+  Changes of existing tools:
+  - cpacfstats: Add ECC counters
+  - dbginfo: Added collection of /proc/softirqs
+  - ipl-tools: Add nvme device support to lsreipl/chreipl
+  - zdsfs: Add coordinated read access
+  - libzds: Add curl interface to access zosmf rest api
+  - util_opt: Change util_opt_init() to honor current command, if set
+  Bug Fixes:
+  - lsluns: Try harder to find udevadm
+  - mon_tools: Update udevadm location
+  - zipl: Fix NVMe partition and base device detection
+  - zipl/stage3: Correctly handle diag308 response code
+  - znetconf: Introduce better ways to locate udevadm
+
+* __v2.13.0 (2020-05-06)__
+
+  For Linux kernel version: 5.5 / 5.6
+
+  Add new tool:
+  - genprotimg: Add genprotimg to create protected virtualization images
+  - genprotimg: Add sample script to verify host keys
 
   Changes of existing tools:
   - dbginfo: Gather bridge related data (using 'bridge')
+  - dbginfo: Removed collection of /var/log/opencryptoki/
+  - dbginfo: collect softnet_stat
+  - dbginfo: gather ethtool output for per-queue coalescing
+  - ipl_tools: Support clear attribute for FCP and CCW re-IPL
+  - zdev: Report FC Endpoint Security of zfcp devices
+  - zdev/dracut/95zdev/module-setup.sh: Add ctcm kernel module
+  - cpumf/data: Add new deflate counters for IBM z15
+  - zkey: Add support for EP11 secure keys
+  - zpcictl: Initiate recover after reset
+  - zipl: Add support for NVMe devices
+  - zipl: A multitude of code and stability improvements
 
   Bug Fixes:
+  - zipl: Prevent endless loop during IPL
+  - zipl/libc: Fix potential buffer overflow in printf
+  - zkey: Fix listing of keys on file systems reporting DT_UNKNOWN
+  - zkey: Fix display of clear key size for XTS, CCA-AESCIPHER, and EP11-AES XTS keys
 
 
- * __v2.12.0 (2019-12-17)__
+* __v2.12.0 (2019-12-17)__
 
   For Linux kernel version: 5.4
 
@@ -38,7 +159,7 @@ Release history for s390-tools (MIT version)
   - zipl: Fix entry point for stand-alone kdump
   - zipl: Add missing options to help output
 
- * __v2.11.0 (2019-09-06)__
+* __v2.11.0 (2019-09-06)__
 
   For Linux kernel version: 5.3
 
@@ -54,7 +175,7 @@ Release history for s390-tools (MIT version)
   - zipl: Fix freeing of uninitialized pointer
   - zipl: Set correct secure IPL default value
 
- * __v2.10.0 (2019-07-31)__
+* __v2.10.0 (2019-07-31)__
 
   For Linux kernel version: 5.2
 
@@ -72,7 +193,7 @@ Release history for s390-tools (MIT version)
   - zipl: Do not overwrite BOOT_IMAGE entry
   - zkey: Fix auto-detection of clear key bitsize for XTS keys
 
- * __v2.9.0 (2019-05-21)__
+* __v2.9.0 (2019-05-21)__
 
   For Linux kernel version: 5.0 / 5.1
 
@@ -105,7 +226,7 @@ Release history for s390-tools (MIT version)
   - zfcpdbf: Warn about ambiguous payload records with dup reqid & payarea
   - zpcictl: Check for regular directory to prevent possible buffer overflow
 
- * __v2.8.0 (2019-02-15)__
+* __v2.8.0 (2019-02-15)__
 
   For Linux kernel version: 4.20
 
@@ -119,7 +240,7 @@ Release history for s390-tools (MIT version)
   - zkey: Avoid EPERM on key change if user is not owner of key file
   - cpumf/cpumf_helper: Always return list reference for --sfb-size
 
- * __v2.7.1 (2018-12-13)__
+* __v2.7.1 (2018-12-13)__
 
   For Linux kernel version: 4.19
 
@@ -143,7 +264,7 @@ Release history for s390-tools (MIT version)
       ip_watcher, libvmdump, libvtoc, lsqeth, lszcrypt, qethqoat, zdev, zdsfs,
       zgetdump, zipl, zpcictl
 
- * __v2.7.0 (2018-10-31)__
+* __v2.7.0 (2018-10-31)__
 
   For Linux kernel version: 4.19
 
@@ -168,7 +289,7 @@ Release history for s390-tools (MIT version)
   - Direct --help and --version output to stdout for several tools
   - osasnmpd: Start without real OSA devices
 
- * __v2.6.0 (2018-08-10)__
+* __v2.6.0 (2018-08-10)__
 
   For Linux kernel version: 4.18
 
@@ -182,7 +303,7 @@ Release history for s390-tools (MIT version)
   - netboot: Include compressed kernel modules in initramfs
   - netboot: Send client architecture and handle path prefix
 
- * __v2.5.0 (2018-06-08)__
+* __v2.5.0 (2018-06-08)__
 
   For Linux kernel version: 4.17
 
@@ -194,7 +315,7 @@ Release history for s390-tools (MIT version)
   Bug Fixes:
   - lsluns: Print a message if no adapter or port exists
 
- * __v2.4.0 (2018-05-07)__
+* __v2.4.0 (2018-05-07)__
 
   For Linux kernel version: 4.16
 

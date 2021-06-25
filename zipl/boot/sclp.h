@@ -13,7 +13,7 @@
 #define SCLP_H
 
 #include "libc.h"
-#include "s390.h"
+#include "boot/s390.h"
 
 /* vector keys and ids */
 #define GDS_ID_MDSMU		0x1310
@@ -28,10 +28,18 @@
 #define SCLP_CMD_READ_INFO2     0x00020001
 #define SCLP_CMD_READ_DATA      0x00770005
 
-#define PSW_EXT_MASK            0x00080000ULL
-#define PSW_EXT_ADDR            0x80000000ULL
-#define PSW_WAIT_MASK           0x010a0000ULL
-#define PSW_WAIT_ADDR           0x00000000ULL
+/* SCLP function codes */
+#define SCLP_FC_NORMAL_WRITE	0
+
+/* SCLP event data types */
+#define SCLP_EVENT_DATA_ASCII	0x1a
+
+/* SCLP event masks */
+#define SCLP_EVENT_MASK_DISABLE	0x00000000
+#define SCLP_EVENT_MASK_SDIAS	0x00000010
+#define SCLP_EVENT_MASK_ASCII	0x00000040
+#define SCLP_EVENT_MASK_MSG	0x40000000
+#define SCLP_EVENT_MASK_OPCMD	0x80000000
 
 #define CTL_SERVICE_SIGNAL      0x0200
 #define CTL_CLOCK_COMPARATOR    0x0800
@@ -40,6 +48,11 @@
 #define SCLP_DISABLE            0x1
 #define SCLP_HSA_INIT           0x2
 #define SCLP_HSA_INIT_ASYNC     0x3
+#define SCLP_LINE_ASCII_INIT    0x4
+
+#define SCCB_SIZE		PAGE_SIZE
+#define SCCB_MAX_DATA_LEN	(SCCB_SIZE - sizeof(struct sccb_header) \
+				 - sizeof(struct evbuf_header))
 
 typedef uint32_t sccb_mask_t;
 
@@ -60,6 +73,7 @@ struct sccb_header {
 	uint8_t      control_mask[3];
 	uint16_t     response_code;
 };
+STATIC_ASSERT(sizeof(struct sccb_header) == 2 + 1 + 3 + 2)
 
 /* Structure must not have any padding */
 struct evbuf_header {
@@ -68,6 +82,7 @@ struct evbuf_header {
 	uint8_t      flags;
 	uint16_t     _reserved;
 };
+STATIC_ASSERT(sizeof(struct evbuf_header) == 2 + 1 + 1 + 2)
 
 struct mto {
 	uint16_t length;
@@ -106,7 +121,10 @@ struct mdb {
 
 struct msg_buf {
 	struct evbuf_header header;
-	struct mdb mdb;
+	union {
+		struct mdb mdb;
+		uint8_t data[0];
+	};
 } __packed;
 
 struct write_sccb {
@@ -156,6 +174,9 @@ struct read_sccb {
 int start_sclp(unsigned int, void *);
 int sclp_setup(int);
 int sclp_print(char *);
+# ifdef ENABLE_SCLP_ASCII
+int sclp_print_ascii(const char *);
+# endif /* ENABLE_SCLP_ASCII */
 int sclp_param(char *);
 int sclp_read(unsigned long, void *, int *);
 int sclp_read_info(struct read_info_sccb *sccb);

@@ -10,11 +10,12 @@
 Description=Apply Control Program Identification (CPI)
 DefaultDependencies=no
 Conflicts=shutdown.target
-After=local-fs.target
+After=sysinit.target
 ConditionPathIsReadWrite=/sys/firmware/cpi
 
 [Service]
 Type=oneshot
+RemainAfterExit=yes
 #
 # Specify a file with the environment variables using the EnvironmentFile=
 # service property.

@@ -18,7 +18,12 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#ifdef HAVE_CURL
+#include <curl/curl.h>
+#endif /* HAVE_CURL */
 
+#include "lib/util_libc.h"
 #include "lib/dasd_base.h"
 #include "lib/dasd_sys.h"
 #include "lib/libzds.h"
@@ -55,6 +60,9 @@ struct errorlog {
 #define ERRORMSG  240
 
 #define BUSIDSIZE  8
+
+#define EBCDIC_SP 0x40
+#define EBCDIC_LF 0x25
 
 /**
  * @brief An internal structure that represents an entry in the error log.
@@ -300,6 +308,10 @@ struct dshandle {
 	unsigned long long skip;
 	/** @brief Detailed error messages in case of a problem */
 	struct errorlog *log;
+
+	char *session_ref;
+	iconv_t *iconv;
+	char *convbuffer;
 };
 
 /** @endcond */
@@ -2806,6 +2818,38 @@ int lzds_dshandle_set_keepRDW(struct dshandle *dsh, int keepRDW)
 }
 
 /**
+ * @pre The dsh must not be open when this function is called.
+ *
+ * @param[in] dsh      The dshandle we want to modify.
+ * @param[in] iconv_t  The iconv handle for codepage conversion.
+ *
+ * @return     0 on success, otherwise one of the following error codes:
+ *   - EBUSY   The handle is already open.
+ */
+int lzds_dshandle_set_iconv(struct dshandle *dsh, iconv_t *iconv)
+{
+	errorlog_clear(dsh->log);
+	if (dsh->is_open)
+		return errorlog_add_message(
+			&dsh->log, NULL, EBUSY,
+			"dshandle: cannot set iconv while handle is open\n");
+
+	/*
+	 * if conversion is enabled the returned data might in worst case
+	 * be 4 times the size of the input buffer. So realloc the buffer.
+	 * If for whatever very unlikely reason the converted size is still
+	 * larger the conversion will fail.
+	 */
+	if (iconv) {
+		dsh->databufmax *= 4;
+		dsh->databuffer = util_realloc(dsh->databuffer,
+					       dsh->databufmax);
+	}
+	dsh->iconv = iconv;
+	return 0;
+}
+
+/**
  * @param[in]  dsh     The dshandle that we want to know the member of.
  * @param[out] keepRDW Reference to a variable in which the previously
  *                     set keepRDW value is returned.
@@ -2939,8 +2983,284 @@ void lzds_dshandle_close(struct dshandle *dsh)
 	for (i = 0; i < MAXVOLUMESPERDS; ++i)
 		if (dsh->dasdhandle[i])
 			lzds_dasdhandle_close(dsh->dasdhandle[i]);
+	free(dsh->convbuffer);
+	free(dsh->iconv);
 	dsh->is_open = 0;
 }
+
+#ifdef HAVE_CURL
+
+struct response_data {
+	char *session_ref;
+	unsigned long statuscode;
+};
+
+static size_t
+parse_response_callback(void *data, size_t size, size_t member, void *target)
+{
+	struct response_data *response = target;
+
+	if (strstr(data, "HTTP/1.1 500 Internal Server Error")) {
+		response->statuscode = 500;
+	} else if (strstr(data, "HTTP/1.1 200 OK")) {
+		response->statuscode = 200;
+	} else
+		sscanf(data, "X-IBM-Session-Ref: %m[^\n]\n",
+		       &response->session_ref);
+
+	return size*member;
+}
+
+static size_t write_discard_callback(void *UNUSED(data), size_t size, size_t member,
+				     void *UNUSED(target))
+{
+	/* do nothing just pretend all data has been processed */
+	return size*member;
+}
+
+CURL *lzds_prepare_curl(char *url)
+{
+	CURL *curl;
+
+	curl = curl_easy_init();
+	if (!curl)
+		return NULL;
+
+	curl_easy_setopt(curl, CURLOPT_URL, url);
+	curl_easy_setopt(curl, CURLOPT_NETRC, CURL_NETRC_OPTIONAL);
+	curl_easy_setopt(curl, CURLOPT_HTTPAUTH, CURLAUTH_ANY);
+	curl_easy_setopt(curl, CURLOPT_CONNECT_ONLY, 0L);
+	curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "GET");
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_discard_callback);
+
+	return curl;
+}
+
+/**
+ * Ping the z/OSMS REST server.
+ * Used to check if the server is responding and accessible and to prevent
+ * the ENQ from timing out. If not used it would be automatically released
+ * after 10 minutes.
+ *
+ * @param[in]  dsh  The dshandle that keeps track of the I/O operations.
+ *             server The URL to the z/OSMF REST services
+ * @return     1 on success, 0 otherwise
+ */
+int lzds_rest_ping(struct dshandle *dsh, char *server)
+{
+	struct curl_slist *list = NULL;
+	char *release;
+	CURLcode res;
+	size_t size;
+	CURL *curl;
+	char *url;
+
+	url = util_strcat_realloc(NULL, server);
+	url = util_strcat_realloc(url, "restfiles/ping");
+
+	curl = lzds_prepare_curl(url);
+	if (!curl) {
+		free(url);
+		return 0;
+	}
+
+	list = curl_slist_append(list, "X-CSRF-ZOSMF-HEADER: none");
+	if (dsh && dsh->session_ref) {
+		size = sizeof("X-IBM-Session-Ref: ") + strlen(dsh->session_ref);
+		release = util_zalloc(size);
+		snprintf(release, size, "X-IBM-Session-Ref: %s",
+			 dsh->session_ref);
+		list = curl_slist_append(list, release);
+	}
+	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, list);
+	res = curl_easy_perform(curl);
+	curl_slist_free_all(list);
+	curl_easy_cleanup(curl);
+
+	if (res == CURLE_OK) {
+		free(url);
+		return 1;
+	}
+
+	fprintf(stderr, "URL: %s\n", url);
+	fprintf(stderr, "Error: %s\n", curl_easy_strerror(res));
+	free(url);
+	return 0;
+}
+
+/**
+ * Mark the dataset as in use for z/OS.
+ * Use z/OSMF REST services to read a small amount of data and get an exclusive
+ * ENQ that prevents z/OS applications from writing to the dataset in parallel
+ * until the ENQ is released.
+ *
+ * @param[in]  dsh  The dshandle that keeps track of the I/O operations.
+ *             server The URL to the z/OSMF REST services
+ * @return     0 on success, otherwise one of the following error codes:
+ *   - ENOTSUP Unable to setup curl and therefore no further access possible.
+ *   - EPERM ENQ not obtained and therefore access is not allowed.
+ */
+int lzds_rest_get_enq(struct dshandle *dsh, char *server)
+{
+	struct curl_slist *list = NULL;
+	struct response_data response;
+	int first_run;
+	CURLcode res;
+	CURL *curl;
+	char *url;
+	int rc;
+
+	url = util_strcat_realloc(NULL, server);
+	url = util_strcat_realloc(url, "restfiles/ds/");
+	url = util_strcat_realloc(url, dsh->ds->name);
+
+	memset(&response, 0, sizeof(response));
+	/*
+	 * in the first run provide a range statement to read only 1 record of
+	 * the dataset to get an ENQ.
+	 * For the unlikely case that the dataset is empty
+	 * "500 Internal Server Error" will be returned.
+	 * If this is the case give it a second try without a range statement
+	 */
+	first_run = 1;
+	list = curl_slist_append(list, "X-IBM-Record-Range: 0-1");
+retry:
+	rc = 1;
+	curl = lzds_prepare_curl(url);
+	if (!curl) {
+		free(url);
+		return errorlog_add_message(
+			&dsh->log,
+			NULL, ENOTSUP,
+			"curl handle not established for dataset %s\n",
+			dsh->ds->name);
+	}
+
+	curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, parse_response_callback);
+	curl_easy_setopt(curl, CURLOPT_HEADERDATA, &response);
+	list = curl_slist_append(list, "X-CSRF-ZOSMF-HEADER: none");
+	list = curl_slist_append(list, "X-IBM-Obtain-ENQ: EXCLU");
+
+	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, list);
+	res = curl_easy_perform(curl);
+
+	if (res != CURLE_OK) {
+		rc = errorlog_add_message(&dsh->log, NULL, ECONNREFUSED,
+					  "Error: %s\n",
+					  curl_easy_strerror(res));
+	} else {
+		if (first_run && response.statuscode == 500) {
+			curl_slist_free_all(list);
+			curl_easy_cleanup(curl);
+			first_run = 0;
+			list = NULL;
+			goto retry;
+		}
+		/* expect that the callback function found a reference string, double check */
+		if (response.statuscode == 200 && response.session_ref) {
+			dsh->session_ref = response.session_ref;
+			rc = 0;
+		} else {
+			rc = errorlog_add_message(
+				&dsh->log,
+				NULL, EPERM,
+				"no session ref obtained for dataset %s rest rc %ld\n",
+				dsh->ds->name, response.statuscode);
+		}
+	}
+
+	free(url);
+	curl_slist_free_all(list);
+	curl_easy_cleanup(curl);
+
+	return rc;
+}
+
+/**
+ * Mark the dataset as no longer in use for z/OS.
+ * Use z/OSMF REST services to read a small amount of data and release the exclusive
+ * ENQ that was previously obtained.
+ *
+ * @param[in]  dsh  The dshandle that keeps track of the I/O operations.
+ *             server The URL to the z/OSMF REST services
+ * @return     0 on success, otherwise one of the following error codes:
+ *   - ENOTSUP Unable to release the ENQ.
+ */
+int lzds_rest_release_enq(struct dshandle *dsh, char *server)
+{
+	struct curl_slist *list = NULL;
+	struct response_data response;
+	char *release;
+	int first_run;
+	CURLcode res;
+	CURL *curl;
+	char *url;
+
+
+	if (!dsh->session_ref) {
+		fprintf(stderr, "No ENQ to release.\n");
+		return 0;
+	}
+
+	url = util_strcat_realloc(NULL, server);
+	url = util_strcat_realloc(url, "restfiles/ds/");
+	url = util_strcat_realloc(url, dsh->ds->name);
+
+	release = util_strcat_realloc(NULL, "X-IBM-Session-Ref: ");
+	release = util_strcat_realloc(release, dsh->session_ref);
+
+	memset(&response, 0, sizeof(response));
+	/*
+	 * in the first run provide a range statement to read only 1 record of
+	 * the dataset to release the ENQ.
+	 * For the unlikely case that the dataset is empty
+	 * "500 Internal Server Error" will be returned.
+	 * If this is the case give it a second try without a range statement
+	 */
+	first_run = 1;
+	list = curl_slist_append(list, "X-IBM-Record-Range: 0-1");
+retry:
+	curl = lzds_prepare_curl(url);
+	if (!curl) {
+		free(url);
+		free(release);
+		return errorlog_add_message(
+			&dsh->log,
+			NULL, ENOTSUP,
+			"curl handle not established for dataset %s\n",
+			dsh->ds->name);
+	}
+
+	list = curl_slist_append(list, "X-CSRF-ZOSMF-HEADER: none");
+	list = curl_slist_append(list, "X-IBM-Release-ENQ: true");
+	list = curl_slist_append(list, release);
+	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, list);
+	curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, parse_response_callback);
+	curl_easy_setopt(curl, CURLOPT_HEADERDATA, &response);
+	res = curl_easy_perform(curl);
+
+	if (res != CURLE_OK) {
+		errorlog_add_message(&dsh->log, NULL, ENOTSUP, "Error: %s\n",
+				     curl_easy_strerror(res));
+	} else if (first_run && response.statuscode == 500) {
+		curl_slist_free_all(list);
+		curl_easy_cleanup(curl);
+		first_run = 0;
+		list = NULL;
+		goto retry;
+	}
+
+	curl_slist_free_all(list);
+	curl_easy_cleanup(curl);
+	free(dsh->session_ref);
+	free(release);
+	free(url);
+	dsh->session_ref = NULL;
+
+	return res;
+}
+
+#endif /* HAVE_CURL */
 
 
 /**
@@ -2999,8 +3319,128 @@ int lzds_dshandle_open(struct dshandle *dsh)
 			return rc;
 		}
 	}
+	if (dsh->iconv)
+		dsh->convbuffer = util_zalloc(dsh->databufmax);
+
 	dsh->is_open = 1;
 	return 0;
+}
+
+/**
+ * @brief subroutine of parse_fixed_record for codepage conversion
+ *
+ * Converts the provided data from one codepage to another using iconv.
+ * Stores converted data directly in the target buffer.
+ * Adds a linebreak at the end of each record to end the line.
+ * Also remove trailing spaces.
+ *
+ * @param[in]  dsh  The dshandle that keeps track of the I/O operations.
+ * @param[in]  rec         Pointer to the record buffer.
+ * @param[in]  targetdata  Pointer to the data buffer.
+ * @return     Number of copied data bytes on success,
+ *             otherwise one of the following (negative) error codes:
+ *   - -EPROTO  The record is malformed.
+ */
+static ssize_t convert_fixed_record(struct dshandle *dsh,
+				    char *rec, char *targetdata)
+{
+	struct eckd_count *ecount = (struct eckd_count *)rec;
+	size_t in_count, out_count, max_count;
+	int reclen, blocksize, reccount;
+	char *inbuf, *outbuf;
+	char *src, *target;
+	size_t rc;
+	int i;
+
+	blocksize = ecount->dl;
+	reclen = dsh->ds->dsp[0]->f1->DS1LRECL;
+	reccount = blocksize / reclen;
+
+	outbuf = targetdata;
+	out_count =  max_count =
+		(unsigned long)dsh->databuffer + dsh->databufmax -
+		(unsigned long)targetdata;
+	in_count = 0;
+	inbuf = dsh->convbuffer;
+
+	/* skip block header */
+	src = (rec + sizeof(*ecount) + ecount->kl);
+	target = inbuf;
+	/* for each record aka line */
+	for (i = 0; i < reccount; i++) {
+		/* remove trailing spaces */
+		while (reclen && (*(src + reclen - 1) == EBCDIC_SP))
+			reclen--;
+		/* move remaining data and add linebreak at end of record */
+		memcpy(target, src, reclen);
+		target += reclen;
+		*target = EBCDIC_LF;
+		target++;
+		/* count how much chars remain after whitespace cleanup */
+		in_count += reclen + 1;
+
+		/* reset for next line */
+		reclen = dsh->ds->dsp[0]->f1->DS1LRECL;
+		src += reclen;
+	}
+	/* convert directly into target buffer */
+	rc = iconv(*(dsh->iconv), &inbuf, &in_count, &outbuf, &out_count);
+	if ((rc == (size_t) -1) || (in_count != 0))
+		return -errorlog_add_message(
+			&dsh->log, NULL, EPROTO,
+			"fixed record parser: codepage conversion failed\n");
+	/* return how much was written in the target buffer */
+	return max_count - out_count;
+}
+
+/**
+ * @brief subroutine of parse_variable_record for codepage conversion
+ *
+ * Converts the record data from one codepage to another using iconv.
+ * Stores converted data directly in the target buffer
+ *
+ * @param[in]  dsh  The dshandle that keeps track of the I/O operations.
+ * @param[in]  reclen      Length of the record.
+ * @param[in]  rec         Pointer to the record buffer.
+ * @param[in]  targetdata  Pointer to the data buffer.
+ * @return     Number of copied data bytes on success,
+ *             otherwise one of the following (negative) error codes:
+ *   - -EPROTO  The record is malformed.
+ */
+static ssize_t convert_variable_record(struct dshandle *dsh, int reclen,
+				       char *rec, char *targetdata)
+{
+	size_t in_count, out_count, max_count;
+	char *inbuf, *outbuf;
+	size_t rc;
+
+	inbuf = rec;
+	outbuf = targetdata;
+	in_count = reclen + 1;
+	out_count = max_count =
+		(unsigned long)dsh->databuffer + dsh->databufmax -
+		(unsigned long)targetdata;
+	/*
+	 * we can not overwrite the track end marker since it is still used
+	 * for this case we have to make a copy of the source data to add the
+	 * linebreak
+	 */
+	if (inbuf[reclen] == 0xFF) {
+		inbuf = dsh->convbuffer;
+		memcpy(inbuf, rec, reclen);
+	}
+
+	/* add linebreak */
+	inbuf[reclen] = 0x25;
+
+	rc = iconv(*(dsh->iconv), &inbuf, &in_count, &outbuf, &out_count);
+	if ((rc == (size_t) -1) || (in_count != 0))
+		return -errorlog_add_message(
+			&dsh->log, NULL, EPROTO,
+			"variable record parser: codepage conversion failed\n");
+
+	/* return how much was written in the target buffer */
+	return max_count - out_count;
 }
 
 /**
@@ -3017,6 +3457,7 @@ static ssize_t parse_fixed_record(struct dshandle *dsh,
 				  char *rec, char *targetdata)
 {
 	struct eckd_count *ecount;
+	int count;
 
 	ecount = (struct eckd_count *)rec;
 	/* Make sure that we do not copy data beyond the end of
@@ -3027,8 +3468,13 @@ static ssize_t parse_fixed_record(struct dshandle *dsh,
 		return - errorlog_add_message(
 			&dsh->log, NULL, EPROTO,
 			"fixed record to long for target buffer\n");
-	memcpy(targetdata, (rec + sizeof(*ecount) + ecount->kl), ecount->dl);
-	return ecount->dl;
+	if (dsh->iconv) {
+		count = convert_fixed_record(dsh, rec, targetdata);
+	} else {
+		memcpy(targetdata, (rec + sizeof(*ecount) + ecount->kl), ecount->dl);
+		count = ecount->dl;
+	}
+	return count;
 }
 
 /**
@@ -3052,6 +3498,7 @@ static ssize_t parse_variable_record(struct dshandle *dsh, char *rec,
 	struct segment_header *blockhead;
 	struct segment_header *seghead;
 	size_t totaldatalength;
+	int count;
 
 	/* We must not rely on the data in rec, as it was read from disk and
 	 * may be broken. Wherever we interprete the data we must have sanity
@@ -3117,9 +3564,19 @@ static ssize_t parse_variable_record(struct dshandle *dsh, char *rec,
 				&dsh->log, NULL, EPROTO,
 				"variable record parser: "
 				"record to long for target buffer\n");
-		memcpy(targetdata, data, segmentlength);
-		targetdata += segmentlength;
-		totaldatalength += segmentlength;
+		if (dsh->iconv) {
+			count = convert_variable_record(dsh, segmentlength,
+							data, targetdata);
+			if (count < 0)
+				return count;
+
+			totaldatalength += count;
+			targetdata += count;
+		} else {
+			memcpy(targetdata, data, segmentlength);
+			totaldatalength += segmentlength;
+			targetdata += segmentlength;
+		}
 		data += segmentlength;
 	}
 	return totaldatalength;

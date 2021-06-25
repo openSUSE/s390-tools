@@ -97,6 +97,35 @@ static void fopen_err(char *path)
 	exit(EXIT_FAILURE);
 }
 
+static void fclose_err(char *path)
+{
+	if (errno == EIO || errno == EOPNOTSUPP)
+		warnx("Unsupported operation: %s: %s", path, strerror(errno));
+	else
+		warnx("Could not close file: %s: %s", path, strerror(errno));
+	free(path);
+	exit(EXIT_FAILURE);
+
+}
+
+static void fread_err(FILE *fp, char *path)
+{
+	warnx("Could not read file: %s: %s", path, strerror(errno));
+	if (fclose(fp))
+		fclose_err(path);
+	free(path);
+	exit(EXIT_FAILURE);
+}
+
+static void fwrite_err(FILE *fp, char *path)
+{
+	warnx("Could not write to file: %s: %s", path, strerror(errno));
+	if (fclose(fp))
+		fclose_err(path);
+	free(path);
+	exit(EXIT_FAILURE);
+}
+
 #define READ_CHUNK_SIZE		512
 
 static char *collect_smart_data(struct zpci_device *pdev)
@@ -152,18 +181,34 @@ static unsigned int sysfs_read_value(struct zpci_device *pdev, const char *attr)
 	if (!fp)
 		fopen_err(path);
 	if (fscanf(fp, "%x", &val) != 1) {
-		fclose(fp);
-		warnx("Could not read file %s: %s", path, strerror(errno));
-		free(path);
-		exit(EXIT_FAILURE);
+		fread_err(fp, path);
 	}
-	fclose(fp);
+	if (fclose(fp))
+		fclose_err(path);
 	free(path);
 
 	return val;
 }
 
-static void sysfs_write_data(struct zpci_report_error *report, char *slot)
+static void sysfs_write_value(struct zpci_device *pdev, const char *attr,
+				unsigned int val)
+{
+	char *path;
+	FILE *fp;
+
+	path = util_path_sysfs("bus/pci/devices/%s/%s", pdev->slot, attr);
+	fp = fopen(path, "w");
+	if (!fp)
+		fopen_err(path);
+	if (fprintf(fp, "%x", val) < 0) {
+		fwrite_err(fp, path);
+	}
+	if (fclose(fp))
+		fclose_err(path);
+	free(path);
+}
+
+static void sysfs_report_error(struct zpci_report_error *report, char *slot)
 {
 	size_t r_size;
 	char *path;
@@ -176,13 +221,9 @@ static void sysfs_write_data(struct zpci_report_error *report, char *slot)
 	if (!fp)
 		fopen_err(path);
 	if (fwrite(report, 1, r_size, fp) != r_size)
-		warnx("Could not write to file: %s: %s", path, strerror(errno));
-	if (fclose(fp)) {
-		if (errno == EIO || errno == EOPNOTSUPP)
-			warnx("Unsupported operation: %s: %s", path, strerror(errno));
-		else
-			warnx("Could not close file: %s: %s", path, strerror(errno));
-	}
+		fwrite_err(fp, path);
+	if (fclose(fp))
+		fclose_err(path);
 	free(path);
 }
 
@@ -288,7 +329,7 @@ static void sclp_issue_action(struct zpci_device *pdev, int action)
 			     sizeof(report.data.log_data));
 		free(sdata);
 	}
-	sysfs_write_data(&report, pdev->slot);
+	sysfs_report_error(&report, pdev->slot);
 }
 
 /*
@@ -297,6 +338,7 @@ static void sclp_issue_action(struct zpci_device *pdev, int action)
 static void sclp_reset_device(struct zpci_device *pdev)
 {
 	sclp_issue_action(pdev, SCLP_ERRNOTIFY_AQ_RESET);
+	sysfs_write_value(pdev, "recover", 1);
 }
 
 /*

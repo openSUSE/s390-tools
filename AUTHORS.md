@@ -1,6 +1,7 @@
 List of all individuals having contributed content to s390-tools
 ----------------------------------------------------------------
 
+- Alexander Egorenkov
 - Alexey Ishchuk
 - Andreas Herrmann
 - Andre Wild
@@ -8,16 +9,19 @@ List of all individuals having contributed content to s390-tools
 - Arnd Bergmann
 - Axel Wirbser
 - Benjamin Block
+- Brian C. Lane
 - Carsten Otte
 - Christian Borntraeger
 - Christian Ehrhardt
 - Christof Schmitt
 - Claudio Imbrenda
 - Clemens von Mann
+- Colin Walters
 - Dan Horak
 - Despina Papadopoulou
 - Dimitri John Ledkov
 - Eberhard Pasch
+- Eduard Shishkin
 - Einar Lueck
 - Eric Sandeen
 - Erwin Vicari
@@ -32,6 +36,7 @@ List of all individuals having contributed content to s390-tools
 - Fritz Elfert
 - Gerald Schaefer
 - Gerhard Tonn
+- Guevenc Guelce
 - Hannes Reinecke
 - Hans-Joachim Picht
 - Hans Wippel
@@ -47,10 +52,12 @@ List of all individuals having contributed content to s390-tools
 - Jan Glauber
 - Jan Hoeppner
 - Jan Willeke
+- Jason J. Herne
 - Javier Martinez Canillas
 - Jean-Baptiste Joret
 - Jens Remus
 - Jochen Roehrig
+- Juergen Christ
 - Julian Wiedmann
 - Karsten Graul
 - Kittipon Meesompop
@@ -58,6 +65,7 @@ List of all individuals having contributed content to s390-tools
 - Lakhvich Dmitriy
 - Marc Hartmayer
 - Mark Dettinger
+- Mark Post
 - Martin Kammerer
 - Martin Peschke
 - Martin Petermann
@@ -69,10 +77,13 @@ List of all individuals having contributed content to s390-tools
 - Michael Mueller
 - Mijo Safradin
 - Mikhail Zaslonko
+- Nikita Dubrovskii
+- Niklas Schnelle
 - Peter Oberparleiter
 - Peter Tiedemann
 - Philipp Kern
 - Philipp Rudo
+- Prashanth Sundararaman
 - Rafael Fonseca
 - Raimund Schroeder
 - Ralph Wuerthner
@@ -91,6 +102,7 @@ List of all individuals having contributed content to s390-tools
 - Steffen Maier
 - Steffen Thoss
 - Susanne Wintenberger
+- Sven Schnelle
 - Sven Schuetz
 - Swen Schillig
 - Taraka R. Bodireddy
@@ -101,7 +113,10 @@ List of all individuals having contributed content to s390-tools
 - Tuan Hoang
 - Ursula Braun
 - Utz Bacher
+- Vance Morris
 - Vasily Gorbik
 - Viktor Mihajlovski
+- Vineeth Vijayan
 - Volker Sameske
+- Wenjia Zhang
 - Wolfgang Taphorn

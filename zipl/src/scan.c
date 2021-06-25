@@ -21,6 +21,7 @@
 #define _GNU_SOURCE
 #endif
 
+#include <assert.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -28,6 +29,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 
 #include <sys/stat.h>
 
@@ -730,6 +732,67 @@ scan_bls_field(struct misc_file_buffer *file, struct scan_token* scan,
 	return 0;
 }
 
+/**
+ * find a line with keyword "title" and move it to the top
+ */
+static int sort_bls_fields(struct misc_file_buffer *file, char *filename)
+{
+	bool is_title = false;
+	size_t title_len = 0;
+	int nr_titles = 0;
+	size_t title_off;
+	char *title;
+	int current;
+	size_t len;
+
+	while (file->length - file->pos > 4 /* for "title" */) {
+		if (strncmp("title", &file->buffer[file->pos], 5) == 0) {
+			is_title = true;
+			nr_titles++;
+			title_off = file->pos;
+		}
+		for (len = 0;; file->pos++, len++) {
+			current = misc_get_char(file, 0);
+			if (current == '\n' || current == EOF)
+				break;
+		}
+		if (is_title == true)
+			title_len = len;
+		if (current == EOF)
+			break;
+		file->pos++;
+	}
+	file->pos = 0;
+
+	if (nr_titles == 0) {
+		error_reason("no title in %s", filename);
+		return -1;
+	}
+	if (nr_titles > 1) {
+		error_reason("more than one title in %s", filename);
+		return -1;
+	}
+	if (title_off == 0)
+		return 0;
+
+	title = misc_malloc(title_len);
+	if (!title)
+		return -1;
+	/*
+	 * copy the title field w/o trailing '\n' to the temporary buffer
+	 */
+	memcpy(title, &file->buffer[title_off], title_len);
+	/*
+	 * shift preceded memory region w/o trailing '\n' to the right
+	 */
+	assert(file->buffer[title_off - 1] == '\n');
+	memmove(&file->buffer[title_len + 1], &file->buffer[0], title_off - 1);
+	file->buffer[title_len] = '\n';
+	memcpy(&file->buffer[0], title, title_len);
+
+	free(title);
+	return 0;
+}
 
 int
 scan_bls(const char* blsdir, struct scan_token** token, int scan_size)
@@ -777,6 +840,10 @@ scan_bls(const char* blsdir, struct scan_token** token, int scan_size)
 		printf("Using BLS config file '%s'\n", filename);
 
 		rc = misc_get_file_buffer(filename, &file);
+		if (rc)
+			goto err;
+
+		rc = sort_bls_fields(&file, filename);
 		if (rc)
 			goto err;
 
@@ -1567,15 +1634,17 @@ scan_check(struct scan_token* scan)
 /*
  * Check if kernel and initrd image paths provided by BLS files are readable.
  * If not, add value of 'scan_keyword_target' into search path and silently
- * update scan list.
+ * update scan list if the file exists.
+ * In case neither path works the scan_check code will correctly handle missing
+ * files
  */
-int
-scan_check_bls(struct scan_token *scan)
+void scan_update_bls_path(struct scan_token *scan)
 {
-	int i, rc;
 	char *target_value = NULL;
 	char *img_value = NULL;
-	char *buffer = NULL;
+	char *file = NULL;
+	char *tmp, *value;
+	int i;
 	/*
 	 * In the BLS case, each BLS section heading inherits a keyword
 	 * assignment target= from zipl.conf, and they are all the same.
@@ -1589,38 +1658,46 @@ scan_check_bls(struct scan_token *scan)
 		}
 	}
 	if (!target_value)
-		return -1;
+		return;
 	for (i = 0 ; scan[i].id != scan_id_empty; i++) {
 		if (scan[i].id != scan_id_keyword_assignment)
 			continue;
 		if (scan[i].content.keyword.keyword == scan_keyword_image ||
 		    scan[i].content.keyword.keyword == scan_keyword_ramdisk) {
 
-			rc = misc_check_readable_file(
-				scan[i].content.keyword.value);
-			if (rc) {
+			value = scan[i].content.keyword.value;
+			/*
+			 * put the filename only into the file var before
+			 * checking its presence
+			 */
+			if (contains_address(value)) {
+				tmp = strrchr(value, ',');
+				file = strndup(value, tmp - value);
+			} else {
+				file = value;
+			}
+			if (misc_check_readable_file(file)) {
 				misc_asprintf(&img_value, "%s%s",
-					      target_value,
-					      scan[i].content.keyword.value);
-				rc = misc_check_readable_file(img_value);
-				if (rc) {
-					error_text(
-						"Image file '%s' is not accessible",
-						scan[i].content.keyword.value);
-					return rc;
+					      target_value, file);
+				if (misc_check_readable_file(img_value))
+					continue;
+
+				/*
+				 * when file has stripped the load address part,
+				 * do generate a prefixed value
+				 */
+				if (file != value) {
+					free(file);
+					free(img_value);
+					misc_asprintf(&img_value, "%s%s",
+						      target_value, value);
 				}
-				buffer = (char *)
-					misc_malloc(strlen(img_value) + 1);
-				if (buffer == NULL)
-					return -1;
-				memcpy(buffer, img_value, strlen(img_value));
-				buffer[strlen(img_value)] = 0;
 				free(scan[i].content.keyword.value);
-				scan[i].content.keyword.value = buffer;
+				scan[i].content.keyword.value = img_value;
 			}
 		}
 	}
-	return 0;
+	return;
 }
 
 static int

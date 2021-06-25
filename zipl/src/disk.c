@@ -25,6 +25,7 @@
 #include <linux/fiemap.h>
 
 #include "lib/util_proc.h"
+#include "lib/util_sys.h"
 
 #include "disk.h"
 #include "error.h"
@@ -405,6 +406,21 @@ disk_get_info(const char* device, struct job_target_data* target,
 				     "determined.");
 			goto out_close;
 		}
+	/* NVMe path, driver name is 'blkext' */
+	} else if (strcmp(data->drv_name, "blkext") == 0) {
+		data->devno = -1;
+		data->type = disk_type_scsi;
+
+		if (util_sys_dev_is_partition(stats.st_rdev)) {
+			if (util_sys_get_base_dev(stats.st_rdev, &data->device))
+				goto out_close;
+			data->partnum = util_sys_get_partnum(stats.st_rdev);
+			if (data->partnum == -1)
+				goto out_close;
+		} else {
+			data->device = stats.st_rdev;
+			data->partnum = 0;
+		}
 	} else {
 		/* Driver name is unknown */
 		error_reason("Unsupported device driver '%s'", data->drv_name);
@@ -428,6 +444,9 @@ type_determined:
 	}
 	/* Convert device size to size in physical blocks */
 	data->phy_blocks = devsize / (data->phy_block_size / 512);
+	/* Adjust start on SCSI according to block_size. device-mapper devices are skipped */
+	if (data->type == disk_type_scsi && target->targetbase == NULL)
+		data->geo.start = data->geo.start / (data->phy_block_size / 512);
 	if (data->partnum != 0)
 		data->partition = stats.st_rdev;
 	/* Try to get device name */

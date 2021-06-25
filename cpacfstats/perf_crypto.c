@@ -3,36 +3,39 @@
  *
  * low level perf functions
  *
- * Copyright IBM Corp. 2015, 2017
+ * Copyright IBM Corp. 2015, 2020
  *
  * s390-tools is free software; you can redistribute it and/or modify
  * it under the terms of the MIT license. See LICENSE for details.
  */
 
+#include <asm/unistd.h>
 #include <errno.h>
 #include <getopt.h>
 #define __STDC_FORMAT_MACROS
 #include <inttypes.h>
-#include <perfmon/perf_event.h>
-#include <perfmon/pfmlib.h>
-#include <perfmon/pfmlib_perf_event.h>
+#include <limits.h>
+#include <linux/perf_event.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
 
 #include "cpacfstats.h"
 
 /* correlation between counter and perf counter string */
 static const struct {
-	char pfm_name[80];
+	char pmu[20];
+	char pfm_name[60];
 	enum ctr_e ctr;
 } pmf_counter_name[ALL_COUNTER] = {
-	{"cpum_cf::DEA_FUNCTIONS", DES_FUNCTIONS},
-	{"cpum_cf::AES_FUNCTIONS", AES_FUNCTIONS},
-	{"cpum_cf::SHA_FUNCTIONS", SHA_FUNCTIONS},
-	{"cpum_cf::PRNG_FUNCTIONS", PRNG_FUNCTIONS}
+	{"cpum_cf", "DEA_FUNCTIONS", DES_FUNCTIONS},
+	{"cpum_cf", "AES_FUNCTIONS", AES_FUNCTIONS},
+	{"cpum_cf", "SHA_FUNCTIONS", SHA_FUNCTIONS},
+	{"cpum_cf", "PRNG_FUNCTIONS", PRNG_FUNCTIONS},
+	{"cpum_cf", "ECC_FUNCTION_COUNT", ECC_FUNCTIONS}
 };
 
 /*
@@ -53,26 +56,105 @@ static const struct {
  */
 static int *ctr_fds[ALL_COUNTER];
 
+static int ecc_supported;
+
+static long perf_event_open(struct perf_event_attr *hw_event, pid_t pid,
+			    int cpu, int group_fd, unsigned long flags)
+{
+	int ret;
+
+	ret = syscall(__NR_perf_event_open, hw_event, pid, cpu,
+		group_fd, flags);
+	return ret;
+}
+
+static int perf_supported(void)
+{
+	return !access("/proc/sys/kernel/perf_event_paranoid", R_OK);
+}
+
+static int perf_counter_supported(const char *pmu, const char *counter)
+{
+	char buf[PATH_MAX];
+
+	if (snprintf(buf, PATH_MAX, "/sys/bus/event_source/devices/%s/events/%s",
+		     pmu, counter) >= PATH_MAX) {
+		eprint("overflow in path name");
+		return 0;
+	}
+	return !access(buf, R_OK);
+}
+
+static int perf_event_encode(struct perf_event_attr *attr,
+			     const char *pmu, const char *event)
+{
+	FILE *f;
+	int eventid;
+	int pmutype;
+	char buf[PATH_MAX];
+
+	if (snprintf(buf, PATH_MAX, "/sys/bus/event_source/devices/%s/events/%s",
+		     pmu, event) >= PATH_MAX) {
+		eprint("overflow in path name");
+		return -1;
+	}
+	f = fopen(buf, "r");
+	if (!f) {
+		eprint("Event %s for pmu %s not found (%d:%s)\n", event, pmu,
+		       errno, strerror(errno));
+		return -1;
+	}
+	if (fscanf(f, "event=0x%x\n", &eventid) != 1) {
+		fclose(f);
+		eprint("Event file %s has invalid format\n", buf);
+		return -1;
+	}
+	fclose(f);
+	if (snprintf(buf, PATH_MAX, "/sys/bus/event_source/devices/%s/type",
+		     pmu) >= PATH_MAX) {
+		eprint("overflow in path name");
+		return -1;
+	}
+	f = fopen(buf, "r");
+	if (!f) {
+		eprint("Event %s for pmu %s not found (%d:%s)\n", event, pmu,
+		       errno, strerror(errno));
+		return -1;
+	}
+	if (fscanf(f, "%d\n", &pmutype) != 1) {
+		fclose(f);
+		eprint("Type file %s has invalid format\n", buf);
+		return -1;
+	}
+	attr->type = pmutype;
+	attr->config = eventid;
+	return 0;
+}
 
 int perf_init(void)
 {
-	int i, cpus, ctr, cpu, ec, *fds;
+	int i, cpus, ctr, cpu, *fds;
 
 	memset(ctr_fds, 0, sizeof(ctr_fds));
 
 	/*  initialize performance monitoring library */
-	ec = pfm_initialize();
-	if (ec != PFM_SUCCESS) {
-		eprint("Pfm_initialize() returned with failure (%d:%s)\n",
-		       ec, pfm_strerror(ec));
+	if (!perf_supported()) {
+		eprint("Performance counter not supported");
 		return -1;
 	}
+
+	/* Check if ECC is supported on current hardware */
+	ecc_supported = perf_counter_supported("cpum_cf", "ECC_FUNCTION_COUNT");
 
 	/* get number of logical processors */
 	cpus = sysconf(_SC_NPROCESSORS_ONLN);
 
 	/* for each counter */
 	for (ctr = 0; ctr < ALL_COUNTER; ctr++) {
+
+		/* Skip ECC counters completely if unsupported */
+		if (ctr == ECC_FUNCTIONS && !ecc_supported)
+			continue;
 
 		/*
 		 * allocate an array of ints to store for each CPU
@@ -88,37 +170,28 @@ int perf_init(void)
 
 		ctr_fds[ctr] = fds;
 
+		/* search for the counter's corresponding pfm name */
+		for (i = ALL_COUNTER-1; i >= 0; i--)
+			if ((int) pmf_counter_name[i].ctr == ctr)
+				break;
+		if (i < 0) {
+			eprint("Pfm ctr name not found for counter %d, please adjust pmf_counter_name[] in %s\n",
+			       ctr, __FILE__);
+			return -1;
+		}
+
 		for (cpu = 0; cpu < cpus; cpu++) {
-			pfm_perf_encode_arg_t pfm_arg;
 			struct perf_event_attr pfm_event;
 			int fd;
 
-			memset(&pfm_arg, 0, sizeof(pfm_arg));
 			memset(&pfm_event, 0, sizeof(pfm_event));
-			pfm_arg.attr = &pfm_event;
-			pfm_arg.size = sizeof(pfm_arg);
 			pfm_event.size = sizeof(pfm_event);
-
-			/* search for the counter's corresponding pfm name */
-			for (i = ALL_COUNTER-1; i >= 0; i--)
-				if ((int) pmf_counter_name[i].ctr == ctr)
-					break;
-			if (i < 0) {
-				eprint("Pfm ctr name not found for counter %d, please adjust pmf_counter_name[] in %s\n",
-				       ctr, __FILE__);
-				return -1;
-			}
-
-			/* encode the counters perf event into pfm_arg.attr */
-			ec = pfm_get_os_event_encoding(
-				pmf_counter_name[i].pfm_name,
-				PFM_PLM0,
-				PFM_OS_PERF_EVENT,
-				&pfm_arg);
-			if (ec != PFM_SUCCESS) {
-				eprint("Pfm_initialize() for %s failed (%d:%s)\n",
+			if (perf_event_encode(&pfm_event,
+					      pmf_counter_name[i].pmu,
+					      pmf_counter_name[i].pfm_name)) {
+				eprint("Failed to initialize counter %s for pmu %s\n",
 				       pmf_counter_name[i].pfm_name,
-				       ec, pfm_strerror(ec));
+				       pmf_counter_name[i].pmu);
 				return -1;
 			}
 
@@ -256,4 +329,9 @@ int perf_read_ctr(enum ctr_e ctr, uint64_t *value)
 	}
 
 	return rc;
+}
+
+int  perf_ecc_supported(void)
+{
+	return ecc_supported;
 }

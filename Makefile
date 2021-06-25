@@ -3,12 +3,14 @@ ARCH := $(shell uname -m | sed -e s/i.86/i386/ -e s/sun4u/sparc64/ -e s/arm.*/ar
 # Include common definitions
 include common.mak
 
-LIB_DIRS = libvtoc libutil libzds libdasd libvmdump libccw libvmcp
+LIB_DIRS = libvtoc libutil libzds libdasd libvmdump libccw libvmcp libekmfweb
 TOOL_DIRS = zipl zdump fdasd dasdfmt dasdview tunedasd \
 	   tape390 osasnmpd qetharp ip_watcher qethconf scripts zconf \
 	   vmconvert vmcp man mon_tools dasdinfo vmur cpuplugd ipl_tools \
 	   ziomon iucvterm hyptop cmsfs-fuse qethqoat zfcpdump zdsfs cpumf \
-	   systemd hmcdrvfs cpacfstats zdev dump2tar zkey netboot etc zpcictl
+	   systemd hmcdrvfs cpacfstats zdev dump2tar zkey netboot etc zpcictl \
+	   genprotimg lsstp hsci hsavmcore
+
 SUB_DIRS = $(LIB_DIRS) $(TOOL_DIRS)
 
 all: $(TOOL_DIRS)

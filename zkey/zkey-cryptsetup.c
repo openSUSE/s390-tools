@@ -35,6 +35,8 @@
 #include "misc.h"
 #include "pkey.h"
 #include "cca.h"
+#include "ep11.h"
+#include "utils.h"
 
 /* Detect if cryptsetup 2.1 or later is available */
 #ifdef CRYPT_LOG_DEBUG_JSON
@@ -71,7 +73,7 @@ static void misc_print_required_parms(const char *parm_name1,
 /*
  * Program configuration
  */
-const struct util_prg prg = {
+static const struct util_prg prg = {
 	.desc = "Manage secure volume keys of volumes encrypted with LUKS2 and "
 		"the 'paes' cipher",
 	.command_args = "COMMAND DEVICE",
@@ -104,12 +106,16 @@ static struct zkey_cryptsetup_globals {
 	bool batch_mode;
 	bool debug;
 	bool verbose;
+	struct ext_lib lib;
 	struct cca_lib cca;
+	struct ep11_lib ep11;
 	int pkey_fd;
 	struct crypt_device *cd;
 } g = {
 	.tries = 3,
 	.pkey_fd = -1,
+	.lib.cca = &g.cca,
+	.lib.ep11 = &g.ep11,
 };
 
 /*
@@ -195,7 +201,7 @@ static struct util_opt opt_vec[] = {
 	{
 		.option = {"complete", 0, NULL, 'c'},
 		.desc = "Completes a staged re-enciphering. Use this option "
-			"after the new CCA master key has been set (made "
+			"after the new master key has been set (made "
 			"active)",
 		.command = COMMAND_REENCIPHER,
 	},
@@ -268,6 +274,7 @@ struct zkey_cryptsetup_command {
 	unsigned int abbrev_len;
 	int (*function)(void);
 	int need_cca_library;
+	int need_ep11_library;
 	int need_pkey_device;
 	char *short_desc;
 	char *long_desc;
@@ -286,7 +293,7 @@ static struct zkey_cryptsetup_command zkey_cryptsetup_commands[] = {
 		.command = COMMAND_REENCIPHER,
 		.abbrev_len = 2,
 		.function = command_reencipher,
-		.need_cca_library = 1,
+		/* Will load the CCA or EP11 library on demand */
 		.need_pkey_device = 1,
 		.short_desc = "Re-encipher a secure volume key",
 		.long_desc = "Re-encipher a secure volume key of a volume "
@@ -361,8 +368,8 @@ static void set_int_handler(void)
 	pr_verbose("Installing SIGINT/SIGTERM handler");
 	memset(&sigaction_open, 0, sizeof(struct sigaction));
 	sigaction_open.sa_handler = int_handler;
-	sigaction(SIGINT, &sigaction_open, 0);
-	sigaction(SIGTERM, &sigaction_open, 0);
+	sigaction(SIGINT, &sigaction_open, NULL);
+	sigaction(SIGTERM, &sigaction_open, NULL);
 }
 
 static void print_usage_command(const struct zkey_cryptsetup_command *command)
@@ -643,10 +650,10 @@ static int get_password_file(char **pwd, size_t *pwd_size, const char *key_file,
 	size_t file_read_size;
 	int regular_file = 0;
 	int char_to_read = 0;
+	size_t buflen = 0, i;
 	int fd, rc, newline;
 	char *pass = NULL;
 	int char_read = 0;
-	size_t buflen, i;
 	struct stat sb;
 
 	fd = key_file ? open(key_file, O_RDONLY) : STDIN_FILENO;
@@ -705,6 +712,7 @@ static int get_password_file(char **pwd, size_t *pwd_size, const char *key_file,
 	if (keyfile_offset && keyfile_seek(fd, keyfile_offset) < 0) {
 		warnx("Cannot seek to requested key file offset %lu",
 		       keyfile_offset);
+		rc = -EIO;
 		goto out_err;
 	}
 
@@ -1198,7 +1206,7 @@ out:
 /*
  * Prompts for yes or no. Returns true if 'y' or 'yes' was entered.
  */
-static bool prompt_for_yes(void)
+static bool _prompt_for_yes(void)
 {
 	char str[20];
 
@@ -1295,7 +1303,7 @@ static int activate_unbound_keyslot(int token, int keyslot, const char *key,
 			    "now in unbound state. Do you want to remove "
 			    "these key slots [y/N]?", 0);
 
-	if (!prompt_for_yes())
+	if (!_prompt_for_yes())
 		return 0;
 
 	for (i = 0, n = 0; ; i++) {
@@ -1535,12 +1543,11 @@ static int reencipher_prepare(int token)
 	char *password = NULL;
 	size_t password_len;
 	char *key = NULL;
-	int selected = 1;
 	size_t keysize;
 	int is_old_mk;
+	bool selected;
 	char *prompt;
 	char *msg;
-	u64 mkvp;
 	int rc;
 
 	if (token >= 0) {
@@ -1551,7 +1558,7 @@ static int reencipher_prepare(int token)
 		util_print_indented(msg, 0);
 		free(msg);
 
-		if (!prompt_for_yes()) {
+		if (!_prompt_for_yes()) {
 			warnx("Device '%s' is left unchanged", g.pos_arg);
 			return -ECANCELED;
 		}
@@ -1598,88 +1605,66 @@ static int reencipher_prepare(int token)
 		if (is_old_mk) {
 			g.fromold = 1;
 			util_asprintf(&msg, "The secure volume key of device "
-				      "'%s' is enciphered with the OLD CCA "
+				      "'%s' is enciphered with the OLD "
 				      "master key and is being re-enciphered "
-				      "with the CURRENT CCA master key.",
+				      "with the CURRENT master key.",
 				      g.pos_arg);
 			util_print_indented(msg, 0);
 			free(msg);
 		} else {
 			g.tonew = 1;
 			util_asprintf(&msg, "The secure volume key of device "
-				      "'%s' is enciphered with the CURRENT CCA "
+				      "'%s' is enciphered with the CURRENT "
 				      "master key and is being re-enciphered "
-				      "with the NEW CCA master key.",
+				      "with the NEW master key.",
 				      g.pos_arg);
 			util_print_indented(msg, 0);
 			free(msg);
 		}
 	}
 
-	rc = get_master_key_verification_pattern((u8 *)key, keysize, &mkvp,
-						 g.verbose);
-	if (rc != 0) {
-		warnx("Failed to get the master key verification pattern: %s",
-		      strerror(-rc));
-		goto out;
-	}
-
 	if (g.fromold) {
-		rc = select_cca_adapter_by_mkvp(&g.cca, mkvp, NULL,
-						FLAG_SEL_CCA_MATCH_OLD_MKVP,
-						g.verbose);
-		if (rc == -ENOTSUP) {
-			rc = 0;
-			selected = 0;
-		}
+		rc = reencipher_secure_key(&g.lib, (u8 *)key, keysize,
+					   NULL, REENCIPHER_OLD_TO_CURRENT,
+					   &selected, g.verbose);
 		if (rc != 0) {
-			util_print_indented("No APQN found that is suitable "
-					    "for re-enciphering the secure AES "
-					    "volume key from the OLD to the "
-					    "CURRENT CCA master key.", 0);
-			goto out;
-		}
-
-		rc = key_token_change(&g.cca, (u8 *)key, keysize,
-				      METHOD_OLD_TO_CURRENT, g.verbose);
-		if (rc != 0) {
-			warnx("Failed to re-encipher the secure volume key of "
-			      "device '%s'\n", g.pos_arg);
-			if (!selected)
-				print_msg_for_cca_envvars(
+			if (rc == -ENODEV) {
+				warnx("No APQN found that is suitable for "
+				      "re-enciphering the secure AES volume "
+				      "key from the OLD to the CURRENT master "
+				      "key.");
+			} else {
+				warnx("Failed to re-encipher the secure volume "
+				      "key for device '%s'\n", g.pos_arg);
+				if (!selected &&
+				    !is_ep11_aes_key((u8 *)key, keysize))
+					print_msg_for_cca_envvars(
 						"secure AES volume key");
-			rc = -EINVAL;
+				rc = -EINVAL;
+			}
 			goto out;
 		}
 	}
 
 	if (g.tonew) {
-		rc = select_cca_adapter_by_mkvp(&g.cca, mkvp, NULL,
-						FLAG_SEL_CCA_MATCH_CUR_MKVP |
-						FLAG_SEL_CCA_NEW_MUST_BE_SET,
-						g.verbose);
-		if (rc == -ENOTSUP) {
-			rc = 0;
-			selected = 0;
-		}
+		rc = reencipher_secure_key(&g.lib, (u8 *)key, keysize,
+					   NULL, REENCIPHER_CURRENT_TO_NEW,
+					   &selected, g.verbose);
 		if (rc != 0) {
-			util_print_indented("No APQN found that is suitable "
-					    "for re-enciphering the secure AES "
-					    "volume key from the CURRENT to "
-					    "the NEW CCA master key.", 0);
-			goto out;
-		}
-
-		rc = key_token_change(&g.cca, (u8 *)key, keysize,
-				      METHOD_CURRENT_TO_NEW,
-				      g.verbose);
-		if (rc != 0) {
-			warnx("Failed to re-encipher the secure volume key of "
-			      "device '%s'\n", g.pos_arg);
-			if (!selected)
-				print_msg_for_cca_envvars(
+			if (rc == -ENODEV) {
+				warnx("No APQN found that is suitable for "
+				      "re-enciphering the secure AES volume "
+				      "key from the CURRENT to the NEW master "
+				      "key.");
+			} else {
+				warnx("Failed to re-encipher the secure volume "
+				      "key for device '%s'\n", g.pos_arg);
+				if (!selected &&
+				    !is_ep11_aes_key((u8 *)key, keysize))
+					print_msg_for_cca_envvars(
 						"secure AES volume key");
-			rc = -EINVAL;
+				rc = -EINVAL;
+			}
 			goto out;
 		}
 	}
@@ -1721,7 +1706,7 @@ static int reencipher_prepare(int token)
 	rc = 0;
 
 	util_asprintf(&msg, "Staged re-enciphering is initiated for "
-		      "device '%s'. After the NEW CCA master key has been set "
+		      "device '%s'. After the NEW master key has been set "
 		      "to become the CURRENT master key, run 'zkey-cryptsetup "
 		      "reencipher' with option '--complete' to complete the "
 		      "re-enciphering process.", g.pos_arg,
@@ -1746,12 +1731,11 @@ static int reencipher_complete(int token)
 	char *password = NULL;
 	size_t password_len;
 	char *key = NULL;
-	int selected = 1;
 	size_t keysize;
 	int is_old_mk;
+	bool selected;
 	char *prompt;
 	char *msg;
-	u64 mkvp;
 	int rc;
 
 	rc = get_reencipher_token(g.cd, token, &tok, true);
@@ -1762,7 +1746,7 @@ static int reencipher_complete(int token)
 	}
 
 	util_asprintf(&msg, "The re-enciphered secure volume key for "
-		      "device '%s' is not valid.\nThe new CCA master key might "
+		      "device '%s' is not valid.\nThe new master key might "
 		      "yet have to be set as the CURRENT master key.",
 		      g.pos_arg);
 	util_asprintf(&prompt, "Enter passphrase for key slot %d of '%s': ",
@@ -1780,56 +1764,41 @@ static int reencipher_complete(int token)
 
 	if (is_old_mk) {
 		util_asprintf(&msg, "The re-enciphered secure volume key "
-			      "of device '%s' is enciphered with the CCA "
+			      "of device '%s' is enciphered with the "
 			      "master key from the OLD master key register. "
-			      "The CCA master key might have changed again, "
+			      "The master key might have changed again, "
 			      "before the previous volume key re-enciphering "
 			      "was completed.\n"
 			      "Do you want to re-encipher the secure key with "
-			      "the CCA master key in the CURRENT master key "
+			      "the master key in the CURRENT master key "
 			      "register [y/N]?", g.pos_arg);
 		util_print_indented(msg, 0);
 		free(msg);
 
-		if (!prompt_for_yes()) {
+		if (!_prompt_for_yes()) {
 			warnx("Re-enciphering was aborted");
 			rc = -ECANCELED;
 			goto out;
 		}
 
-		rc = get_master_key_verification_pattern((u8 *)key, keysize,
-							 &mkvp, g.verbose);
+		rc = reencipher_secure_key(&g.lib, (u8 *)key, keysize,
+					   NULL, REENCIPHER_OLD_TO_CURRENT,
+					   &selected, g.verbose);
 		if (rc != 0) {
-			warnx("Failed to get the master key verification "
-			      "pattern: %s",
-			      strerror(-rc));
-			goto out;
-		}
-
-		rc = select_cca_adapter_by_mkvp(&g.cca, mkvp, NULL,
-						FLAG_SEL_CCA_MATCH_OLD_MKVP,
-						g.verbose);
-		if (rc == -ENOTSUP) {
-			rc = 0;
-			selected = 0;
-		}
-		if (rc != 0) {
-			util_print_indented("No APQN found that is suitable "
-					    "for re-enciphering the secure AES "
-					    "volume key from the OLD to the "
-					    "CURRENT CCA master key.", 0);
-			goto out;
-		}
-
-		rc = key_token_change(&g.cca, (u8 *)key, keysize,
-				      METHOD_OLD_TO_CURRENT, g.verbose);
-		if (rc != 0) {
-			warnx("Failed to re-encipher the secure volume key for "
-			      "device '%s'\n", g.pos_arg);
-			if (!selected)
-				print_msg_for_cca_envvars(
+			if (rc == -ENODEV) {
+				warnx("No APQN found that is suitable for "
+				      "re-enciphering the secure AES volume "
+				      "key from the OLD to the CURRENT master "
+				      "key.");
+			} else {
+				warnx("Failed to re-encipher the secure volume "
+				      "key for device '%s'\n", g.pos_arg);
+				if (!selected &&
+				    !is_ep11_aes_key((u8 *)key, keysize))
+					print_msg_for_cca_envvars(
 						"secure AES volume key");
-			rc = -EINVAL;
+				rc = -EINVAL;
+			}
 			goto out;
 		}
 
@@ -1952,13 +1921,14 @@ static int command_validate(void)
 	int reenc_pending = 0, vp_tok_avail = 0, is_valid = 0, is_old_mk = 0;
 	struct reencipher_token reenc_tok;
 	struct vp_token vp_tok;
+	const char *key_type;
+	u8 mkvp[MKVP_LENGTH];
 	size_t clear_keysize;
 	size_t keysize = 0;
 	char *key = NULL;
 	char *prompt;
 	char *msg;
 	int token;
-	u64 mkvp;
 	int rc;
 
 	util_asprintf(&prompt, "Enter passphrase for '%s': ", g.pos_arg);
@@ -1990,28 +1960,32 @@ static int command_validate(void)
 	}
 
 	rc = get_master_key_verification_pattern((u8 *)key, keysize,
-						 &mkvp, g.verbose);
+						 mkvp, g.verbose);
 	if (rc != 0) {
 		warnx("Failed to get the master key verification pattern: %s",
 		      strerror(-rc));
 		goto out;
 	}
 
+	key_type = get_key_type((u8 *)key, keysize);
+
 	printf("Validation of secure volume key of device '%s':\n", g.pos_arg);
 	printf("  Status:                %s\n", is_valid ? "Valid" : "Invalid");
 	printf("  Secure key size:       %lu bytes\n", keysize);
 	printf("  XTS type key:          %s\n",
 	       is_xts_key((u8 *)key, keysize) ? "Yes" : "No");
-	printf("  Key type:              %s\n",
-	       get_key_type((u8 *)key, keysize));
+	printf("  Key type:              %s\n", key_type);
 	if (is_valid) {
 		printf("  Clear key size:        %lu bits\n", clear_keysize);
-		printf("  Enciphered with:       %s CCA master key (MKVP: "
-		       "%016llx)\n", is_old_mk ? "OLD" : "CURRENT", mkvp);
+		printf("  Enciphered with:       %s master key (MKVP: "
+		       "%s)\n", is_old_mk ? "OLD" : "CURRENT",
+		       printable_mkvp(get_card_type_for_keytype(key_type),
+				      mkvp));
 	} else {
 		printf("  Clear key size:        (unknown)\n");
-		printf("  Enciphered with:       (unknown, MKVP: %016llx)\n",
-		       mkvp);
+		printf("  Enciphered with:       (unknown, MKVP: %s)\n",
+		       printable_mkvp(get_card_type_for_keytype(key_type),
+				      mkvp));
 	}
 	if (vp_tok_avail)
 		print_verification_pattern(vp_tok.verification_pattern);
@@ -2029,10 +2003,10 @@ static int command_validate(void)
 
 	if (is_old_mk)
 		util_print_indented("\nWARNING: The secure volume key is "
-				    "currently enciphered with the OLD CCA "
+				    "currently enciphered with the OLD "
 				    "master key. To mitigate the danger of "
 				    "data loss re-encipher the volume key with "
-				    "the CURRENT CCA master key.", 0);
+				    "the CURRENT master key.", 0);
 
 	if (is_valid && !vp_tok_avail) {
 		util_asprintf(&msg, "\nWARNING: The volume key cannot be "
@@ -2148,14 +2122,14 @@ static int command_setkey(void)
 
 	if (is_old_mk) {
 		util_asprintf(&msg, "The secure key in file '%s' is "
-			      "enciphered with the CCA master key in the OLD "
+			      "enciphered with the master key in the OLD "
 			      "master key register. Do you want to set this "
 			      "key as the new volume key anyway [y/N]?",
 			      g.master_key_file);
 		util_print_indented(msg, 0);
 		free(msg);
 
-		if (!prompt_for_yes()) {
+		if (!_prompt_for_yes()) {
 			warnx("Device '%s' is left unchanged", g.pos_arg);
 			rc = -EINVAL;
 			goto out;
@@ -2213,7 +2187,7 @@ static int command_setkey(void)
 		util_print_indented(msg, 0);
 		free(msg);
 
-		if (!prompt_for_yes()) {
+		if (!_prompt_for_yes()) {
 			warnx("Device '%s' is left unchanged", g.pos_arg);
 			rc = -EINVAL;
 			goto out;
@@ -2282,7 +2256,7 @@ static bool is_command(struct zkey_cryptsetup_command *command, const char *str)
 /*
  * Find the command in the command table
  */
-struct zkey_cryptsetup_command *find_command(const char *command)
+static struct zkey_cryptsetup_command *find_command(const char *command)
 {
 	struct zkey_cryptsetup_command *cmd = zkey_cryptsetup_commands;
 
@@ -2424,6 +2398,13 @@ int main(int argc, char *argv[])
 
 	if (command->need_cca_library) {
 		rc = load_cca_library(&g.cca, g.verbose);
+		if (rc != 0) {
+			rc = EXIT_FAILURE;
+			goto out;
+		}
+	}
+	if (command->need_ep11_library) {
+		rc = load_ep11_library(&g.ep11, g.verbose);
 		if (rc != 0) {
 			rc = EXIT_FAILURE;
 			goto out;

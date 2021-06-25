@@ -5,7 +5,7 @@ COMMON_INCLUDED = true
 # The variable "DISTRELEASE" should be overwritten in rpm spec files with:
 # "make DISTRELEASE=%{release}" and "make install DISTRELEASE=%{release}"
 VERSION            = 2
-RELEASE            = 12
+RELEASE            = 16
 PATCHLEVEL         = 0
 DISTRELEASE        = build-$(shell date +%Y%m%d)
 S390_TOOLS_RELEASE = $(VERSION).$(RELEASE).$(PATCHLEVEL)-$(DISTRELEASE)
@@ -106,6 +106,11 @@ endif
 DEFAULT_CPPFLAGS = -D_GNU_SOURCE
 DEFAULT_LDFLAGS = -rdynamic
 
+ifeq ("${ASAN}","1")
+	DEFAULT_CFLAGS  += -fsanitize=address -fno-omit-frame-pointer
+	DEFAULT_LDFLAGS += -fsanitize=address
+endif
+
 #
 # Check for build dependency
 #
@@ -163,6 +168,7 @@ USRSBINDIR      = $(INSTALLDIR)/usr/sbin
 USRBINDIR       = $(INSTALLDIR)/usr/bin
 BINDIR          = $(INSTALLDIR)/sbin
 LIBDIR          = $(INSTALLDIR)/lib
+USRLIB64DIR     = $(INSTALLDIR)/usr/lib64
 SYSCONFDIR      = $(INSTALLDIR)/etc
 MANDIR          = $(INSTALLDIR)/usr/share/man
 VARDIR          = $(INSTALLDIR)/var
@@ -172,14 +178,24 @@ ZFCPDUMP_DIR    = $(TOOLS_LIBDIR)/zfcpdump
 # Systemd support files are installed only if a directory is specified
 # for SYSTEMDSYSTEMUNITDIR (e.g. /lib/systemd/system)
 SYSTEMDSYSTEMUNITDIR =
+USRINCLUDEDIR   = $(INSTALLDIR)/usr/include
+ZKEYKMSPLUGINDIR = $(USRLIB64DIR)/zkey
+
+ifeq ($(LIBDIR),$(INSTALLDIR)/lib)
+SOINSTALLDIR = $(USRLIB64DIR)
+else
+SOINSTALLDIR = $(LIBDIR)
+endif
 
 INSTDIRS        = $(USRSBINDIR) $(USRBINDIR) $(BINDIR) $(LIBDIR) $(MANDIR) \
 			$(SYSCONFDIR) $(SYSCONFDIR)/sysconfig \
 			$(TOOLS_LIBDIR) $(TOOLS_DATADIR) \
-			$(ZFCPDUMP_DIR) $(SYSTEMDSYSTEMUNITDIR)
+			$(ZFCPDUMP_DIR) $(SYSTEMDSYSTEMUNITDIR) \
+			$(USRLIB64DIR) $(USRINCLUDEDIR) $(ZKEYKMSPLUGINDIR) \
+			$(SOINSTALLDIR)
 OWNER           = $(shell id -un)
 GROUP		= $(shell id -gn)
-export INSTALLDIR BINDIR LIBDIR MANDIR OWNER GROUP
+export INSTALLDIR BINDIR LIBDIR USRLIB64DIR MANDIR OWNER GROUP
 
 # Special defines for zfcpdump
 ZFCPDUMP_IMAGE	= zfcpdump-image
@@ -261,6 +277,7 @@ help:
 	@echo '  G=1      Build with gcov to collect code coverage data'
 	@echo '  V=1      Generate verbose build output'
 	@echo '  W=1      Build with higher warning level'
+	@echo '  ASAN=1   Build with address sanitizer'
 	@echo ''
 	@echo 'EXAMPLES'
 	@echo '  # make clean all D=1 W=1 -j'
@@ -339,6 +356,10 @@ $(rootdir)/libvmcp/libvmcp.a: $(rootdir)/libvmcp
 	$(MAKE) -C $(rootdir)/libvmcp/ libvmcp.a
 .PHONY: $(rootdir)/libvmcp
 
+$(rootdir)/libekmfweb/libekmfweb.so: $(rootdir)/libekmfweb
+	$(MAKE) -C $(rootdir)/libekmfweb/ libekmfweb.so
+.PHONY: $(rootdir)/libekmfweb
+
 $(rootdir)/zipl/boot/data.o:
 	$(MAKE) -C $(rootdir)/zipl/boot/ data.o
 
@@ -359,9 +380,9 @@ install: install_echo install_dirs
 clean_echo:
 	$(call echocmd,"  CLEAN   ")
 clean_gcov:
-	rm -f *.gcda *.gcno *.gcov
+	rm -f -- *.gcda *.gcno *.gcov
 clean_dep:
-	rm -f .*.o.d
+	rm -f -- .*.o.d
 
 clean: clean_echo clean_gcov clean_dep
 endif

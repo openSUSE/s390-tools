@@ -162,6 +162,9 @@ int load_cca_library(struct cca_lib *cca, bool verbose)
 	/* Cryptographic Resource Deallocate function */
 	cca->dll_CSUACRD = (t_CSUACRD)dlsym(cca->lib_csulcca, "CSUACRD");
 
+	/* Get the Key Token Build 2 function */
+	cca->dll_CSNBKTB2 = (t_CSNBKTB2)dlsym(cca->lib_csulcca, "CSNBKTB2");
+
 	/* Get the Key Translate 2 function */
 	cca->dll_CSNBKTR2 = (t_CSNBKTR2)dlsym(cca->lib_csulcca, "CSNBKTR2");
 
@@ -174,6 +177,7 @@ int load_cca_library(struct cca_lib *cca, bool verbose)
 	    cca->dll_CSUACFQ == NULL ||
 	    cca->dll_CSUACRA == NULL ||
 	    cca->dll_CSUACRD == NULL ||
+	    cca->dll_CSNBKTB2 == NULL ||
 	    cca->dll_CSNBKTR2 == NULL ||
 	    cca->dll_CSNBRKA == NULL) {
 		pr_verbose(verbose, "%s", dlerror());
@@ -554,11 +558,12 @@ static int get_cca_adapter_version(struct cca_lib *cca,
  *          because the zcrypt kernel module is on an older level. -ENODEV is
  *          returned if the APQN is not available.
  */
-int select_cca_adapter(struct cca_lib *cca, int card, int domain, bool verbose)
+int select_cca_adapter(struct cca_lib *cca, unsigned int card,
+		       unsigned int domain, bool verbose)
 {
 	unsigned int adapters, adapter;
 	char adapter_serialnr[9];
-	char apqn_serialnr[9];
+	char apqn_serialnr[SERIALNR_LENGTH];
 	char temp[10];
 	int rc, found = 0;
 
@@ -630,15 +635,15 @@ int select_cca_adapter(struct cca_lib *cca, int card, int domain, bool verbose)
 }
 
 struct find_mkvp_info {
-	u64		mkvp;
+	u8		mkvp[MKVP_LENGTH];
 	unsigned int	flags;
 	bool		found;
-	int		card;
-	int		domain;
+	unsigned int	card;
+	unsigned int	domain;
 	bool		verbose;
 };
 
-static int find_mkvp(int card, int domain, void *handler_data)
+static int find_mkvp(unsigned int card, unsigned int domain, void *handler_data)
 {
 	struct find_mkvp_info *info = (struct find_mkvp_info *)handler_data;
 	struct mk_info mk_info;
@@ -653,12 +658,12 @@ static int find_mkvp(int card, int domain, void *handler_data)
 
 	if (info->flags & FLAG_SEL_CCA_MATCH_CUR_MKVP)
 		if (mk_info.cur_mk.mk_state == MK_STATE_VALID &&
-		    mk_info.cur_mk.mkvp == info->mkvp)
+		    MKVP_EQ(mk_info.cur_mk.mkvp, info->mkvp))
 			found = true;
 
 	if (info->flags & FLAG_SEL_CCA_MATCH_OLD_MKVP)
 		if (mk_info.old_mk.mk_state == MK_STATE_VALID &&
-		    mk_info.old_mk.mkvp == info->mkvp)
+		    MKVP_EQ(mk_info.old_mk.mkvp, info->mkvp))
 			found = true;
 
 	if (info->flags & FLAG_SEL_CCA_NEW_MUST_BE_SET)
@@ -700,25 +705,27 @@ static int find_mkvp(int card, int domain, void *handler_data)
  *          because the zcrypt kernel module is on an older level. -ENODEV is
  *          returned if no APQN is available with the desired mkvp.
  */
-int select_cca_adapter_by_mkvp(struct cca_lib *cca, u64 mkvp, const char *apqns,
+int select_cca_adapter_by_mkvp(struct cca_lib *cca, u8 *mkvp, const char *apqns,
 		 unsigned int flags, bool verbose)
 {
 	struct find_mkvp_info info;
 	int rc;
 
 	util_assert(cca != NULL, "Internal error: cca is NULL");
+	util_assert(mkvp != NULL, "Internal error: mkvp is NULL");
 
-	pr_verbose(verbose, "Select mkvp %016llx in APQNs %s for the CCA host "
-		   "library", mkvp, apqns == 0 ? "ANY" : apqns);
+	pr_verbose(verbose, "Select mkvp %s in APQNs %s for the CCA host "
+		   "library", printable_mkvp(CARD_TYPE_CCA, mkvp),
+		   apqns == NULL ? "ANY" : apqns);
 
-	info.mkvp = mkvp;
+	memcpy(info.mkvp, mkvp, sizeof(info.mkvp));
 	info.flags = flags;
 	info.found = false;
 	info.card = 0;
 	info.domain = 0;
 	info.verbose = verbose;
 
-	rc = handle_apqns(apqns, find_mkvp, &info, verbose);
+	rc = handle_apqns(apqns, CARD_TYPE_CCA, find_mkvp, &info, verbose);
 	if (rc < 0)
 		return rc;
 
@@ -769,7 +776,7 @@ int convert_aes_data_to_cipher_key(struct cca_lib *cca,
 	long input_token_size, output_token_size, zero = 0;
 	long exit_data_len = 0, rule_array_count = 0;
 	unsigned char *input_token, *output_token;
-	unsigned char rule_array[8 * 2] = { 0, };
+	unsigned char rule_array[8 * 4] = { 0 };
 	unsigned char null_token[64] = { 0, };
 	long null_token_len = sizeof(null_token);
 	unsigned char exit_data[4] = { 0, };
@@ -819,9 +826,33 @@ int convert_aes_data_to_cipher_key(struct cca_lib *cca,
 	output_token_size = sizeof(buffer);
 	memset(buffer, 0, sizeof(buffer));
 
+	memcpy(rule_array, "INTERNAL", 8);
+	memcpy(rule_array + 8, "AES     ", 8);
+	memcpy(rule_array + 16, "XPRTCPAC", 8);
+	memcpy(rule_array + 24, "CIPHER  ", 8);
+	rule_array_count = 4;
+
+	cca->dll_CSNBKTB2(&return_code, &reason_code,
+			  &exit_data_len, exit_data,
+			  &rule_array_count, rule_array,
+			  &zero, NULL, &zero, NULL,
+			  &zero, NULL, &zero, NULL,
+			  &zero, NULL,
+			  &output_token_size, output_token);
+
+	pr_verbose(verbose, "CSNBKTB2 (Key Token Build2) "
+		   "returned: return_code: %ld, reason_code: %ld", return_code,
+		   reason_code);
+	if (return_code != 0) {
+		print_CCA_error(return_code, reason_code);
+		return -EIO;
+	}
+
 	memcpy(rule_array, "AES     ", 8);
 	memcpy(rule_array + 8, "REFORMAT", 8);
 	rule_array_count = 2;
+
+	output_token_size = sizeof(buffer);
 
 	cca->dll_CSNBKTR2(&return_code, &reason_code,
 			  &exit_data_len, exit_data,
@@ -870,6 +901,34 @@ int convert_aes_data_to_cipher_key(struct cca_lib *cca,
 		output_token = buffer;
 		output_token_size = sizeof(buffer);
 		memset(buffer, 0, sizeof(buffer));
+
+		memcpy(rule_array, "INTERNAL", 8);
+		memcpy(rule_array + 8, "AES     ", 8);
+		memcpy(rule_array + 16, "XPRTCPAC", 8);
+		memcpy(rule_array + 24, "CIPHER  ", 8);
+		rule_array_count = 4;
+
+		cca->dll_CSNBKTB2(&return_code, &reason_code,
+				  &exit_data_len, exit_data,
+				  &rule_array_count, rule_array,
+				  &zero, NULL, &zero, NULL,
+				  &zero, NULL, &zero, NULL,
+				  &zero, NULL,
+				  &output_token_size, output_token);
+
+		pr_verbose(verbose, "CSNBKTB2 (Key Token Build2) "
+			   "returned: return_code: %ld, reason_code: %ld",
+			   return_code, reason_code);
+		if (return_code != 0) {
+			print_CCA_error(return_code, reason_code);
+			return -EIO;
+		}
+
+		memcpy(rule_array, "AES     ", 8);
+		memcpy(rule_array + 8, "REFORMAT", 8);
+		rule_array_count = 2;
+
+		output_token_size = sizeof(buffer);
 
 		cca->dll_CSNBKTR2(&return_code, &reason_code,
 				  &exit_data_len, exit_data,

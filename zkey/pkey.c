@@ -26,6 +26,7 @@
 #include "lib/util_panic.h"
 
 #include "pkey.h"
+#include "utils.h"
 
 #ifndef AF_ALG
 #define AF_ALG 38
@@ -43,8 +44,6 @@
 #define HALF_KEYSIZE_FOR_XTS(keysize, xts)   ((xts) ? (keysize) / 2 : (keysize))
 
 #define MAX_CIPHER_LEN		32
-
-#define DEFAULT_KEYBITS		256
 
 #define INITIAL_APQN_ENTRIES	16
 
@@ -691,6 +690,10 @@ static int build_apqn_list_for_key_type(int pkey_fd, enum pkey_key_type type,
 							  apqn_entries,
 							  verbose);
 			return rc;
+		case -EINVAL:
+			/* This is usually due to an unsupported key type */
+			rc = -ENOTSUP;
+			goto out;
 		default:
 			goto out;
 		}
@@ -753,7 +756,6 @@ static int build_apqn_list_for_key(int pkey_fd, u8 *key, u32 keylen, u32 flags,
 				   u32 *apqn_entries, bool verbose)
 {
 	struct pkey_apqns4key apqns4key;
-	u64 mkvp;
 	int rc;
 
 	util_assert(pkey_fd != -1, "Internal error: pkey_fd is -1");
@@ -796,16 +798,14 @@ static int build_apqn_list_for_key(int pkey_fd, u8 *key, u32 keylen, u32 flags,
 			if (!is_cca_aes_data_key(key, keylen))
 				return -ENOTSUP;
 
-			rc = get_master_key_verification_pattern(key, keylen,
-								 &mkvp,
-								 verbose);
-			if (rc != 0)
-				return rc;
-
 			rc = build_apqn_list_for_aes_data(apqn_list, apqns,
 							  apqn_entries,
 							  verbose);
 			return rc;
+		case -EINVAL:
+			/* This is usually due to an unsupported key type */
+			rc = -ENOTSUP;
+			goto out;
 		default:
 			goto out;
 		}
@@ -857,6 +857,8 @@ static enum pkey_key_type key_type_to_pkey_type(const char *key_type)
 		return PKEY_TYPE_CCA_DATA;
 	if (strcasecmp(key_type, KEY_TYPE_CCA_AESCIPHER) == 0)
 		return PKEY_TYPE_CCA_CIPHER;
+	if (strcasecmp(key_type, KEY_TYPE_EP11_AES) == 0)
+		return PKEY_TYPE_EP11;
 
 	return 0;
 }
@@ -875,6 +877,8 @@ static size_t key_size_for_type(enum pkey_key_type type)
 		return AESDATA_KEY_SIZE;
 	case PKEY_TYPE_CCA_CIPHER:
 		return AESCIPHER_KEY_SIZE;
+	case PKEY_TYPE_EP11:
+		return EP11_KEY_SIZE;
 	default:
 		return 0;
 	}
@@ -1218,7 +1222,7 @@ static int validate_secure_xts_key(int pkey_fd, struct pkey_apqn *apqn,
  * @param[out] clear_key_bitsize on return , the cryptographic size of the
  *                          clear key
  * @param[out] is_old_mk    in return set to 1 to indicate if the secure key
- *                          is currently enciphered by the OLD CCA master key
+ *                          is currently enciphered by the OLD master key
  * @param[in] apqns         a zero terminated array of pointers to APQN-strings,
  *                          or NULL for AUTOSELECT
  * @param[in] verbose       if true, verbose messages are printed
@@ -1234,6 +1238,7 @@ int validate_secure_key(int pkey_fd,
 	struct pkey_apqn *list = NULL;
 	u32 i, list_entries = 0;
 	bool xts, valid;
+	u32 flags;
 	int rc;
 
 	util_assert(pkey_fd != -1, "Internal error: pkey_fd is -1");
@@ -1241,11 +1246,15 @@ int validate_secure_key(int pkey_fd,
 
 	xts = is_xts_key(secure_key, secure_key_size);
 
+	flags = PKEY_FLAGS_MATCH_CUR_MKVP;
+	if (is_cca_aes_data_key(secure_key, secure_key_size) ||
+	    is_cca_aes_cipher_key(secure_key, secure_key_size))
+		flags |= PKEY_FLAGS_MATCH_ALT_MKVP;
+
 	rc = build_apqn_list_for_key(pkey_fd, secure_key,
 				     HALF_KEYSIZE_FOR_XTS(secure_key_size, xts),
-				     PKEY_FLAGS_MATCH_CUR_MKVP |
-						PKEY_FLAGS_MATCH_ALT_MKVP,
-				     apqns, &list, &list_entries, verbose);
+				     flags, apqns, &list, &list_entries,
+				     verbose);
 	if (rc != 0) {
 		pr_verbose(verbose, "Failed to build a list of APQNs that can "
 			   "validate this secure key: %s", strerror(-rc));
@@ -1328,7 +1337,7 @@ int validate_secure_key(int pkey_fd,
 int generate_key_verification_pattern(const u8 *key, size_t key_size,
 				      char *vp, size_t vp_len, bool verbose)
 {
-	int tfmfd = -1, opfd = -1, rc = 0;
+	int tfmfd = -1, opfd = -1, rc = 0, retry_count = 0;
 	char null_msg[ENC_ZERO_LEN];
 	char enc_zero[ENC_ZERO_LEN];
 	struct af_alg_iv *alg_iv;
@@ -1376,14 +1385,32 @@ int generate_key_verification_pattern(const u8 *key, size_t key_size,
 		goto out;
 	}
 
+retry_setkey:
 	if (setsockopt(tfmfd, SOL_ALG, ALG_SET_KEY, key,
 		       key_size) < 0) {
 		rc = -errno;
-		pr_verbose(verbose, "Failed to set the key");
+		pr_verbose(verbose, "Failed to set the key: %s",
+			   strerror(-rc));
+
+		/*
+		 * After a master key change, it can happen that the setkey
+		 * operation returns EINVAL or EAGAIN, although the key is
+		 * valid. This is a temporary situation and the operation will
+		 * succeed, once the firmware has completed some internal
+		 * processing related with the master key change.
+		 * Delay 1 second and retry up to 10 times.
+		 */
+		if ((rc == -EINVAL || rc == -EAGAIN) && retry_count < 10) {
+			pr_verbose(verbose, "Retrying after 1 second...");
+			retry_count++;
+			sleep(1);
+			goto retry_setkey;
+		}
 		goto out;
 	}
+	rc = 0;
 
-	opfd = accept(tfmfd, NULL, 0);
+	opfd = accept(tfmfd, NULL, NULL);
 	if (opfd < 0) {
 		rc = -errno;
 		pr_verbose(verbose, "Failed to accept on the AF_ALG socket");
@@ -1454,18 +1481,22 @@ out:
 }
 
 int get_master_key_verification_pattern(const u8 *key, size_t key_size,
-					u64 *mkvp, bool UNUSED(verbose))
+					u8 *mkvp, bool UNUSED(verbose))
 {
 	struct aesdatakeytoken *datakey = (struct aesdatakeytoken *)key;
 	struct aescipherkeytoken *cipherkey = (struct aescipherkeytoken *)key;
+	struct ep11keytoken *ep11key = (struct ep11keytoken *)key;
 
 	util_assert(key != NULL, "Internal error: secure_key is NULL");
 	util_assert(mkvp != NULL, "Internal error: mkvp is NULL");
 
+	memset(mkvp, 0, MKVP_LENGTH);
 	if (is_cca_aes_data_key(key, key_size))
-		*mkvp = datakey->mkvp;
+		memcpy(mkvp, &datakey->mkvp, sizeof(datakey->mkvp));
 	else if (is_cca_aes_cipher_key(key, key_size))
-		memcpy(mkvp, cipherkey->kvp, sizeof(*mkvp));
+		memcpy(mkvp, &cipherkey->kvp, sizeof(cipherkey->kvp));
+	else if (is_ep11_aes_key(key, key_size))
+		memcpy(mkvp, &ep11key->wkvp, sizeof(ep11key->wkvp));
 	else
 		return -EINVAL;
 
@@ -1546,6 +1577,34 @@ bool is_cca_aes_cipher_key(const u8 *key, size_t key_size)
 }
 
 /**
+ * Check if the specified key is a EP11 AES key token.
+ *
+ * @param[in] key           the secure key token
+ * @param[in] key_size      the size of the secure key
+ *
+ * @returns true if the key is an EP11 AES token type
+ */
+bool is_ep11_aes_key(const u8 *key, size_t key_size)
+{
+	struct ep11keytoken *ep11key = (struct ep11keytoken *)key;
+
+	if (key == NULL || key_size < EP11_KEY_SIZE)
+		return false;
+
+	if (ep11key->head.type != TOKEN_TYPE_NON_CCA)
+		return false;
+	if (ep11key->head.version != TOKEN_VERSION_EP11_AES)
+		return false;
+	if (ep11key->head.length > key_size)
+		return false;
+
+	if (ep11key->version != 0x1234)
+		return false;
+
+	return true;
+}
+
+/**
  * Check if the specified key is an XTS type key
  *
  * @param[in] key           the secure key token
@@ -1564,6 +1623,11 @@ bool is_xts_key(const u8 *key, size_t key_size)
 		if (key_size == 2 * AESCIPHER_KEY_SIZE &&
 		    is_cca_aes_cipher_key(key + AESCIPHER_KEY_SIZE,
 					  key_size - AESCIPHER_KEY_SIZE))
+			return true;
+	} else if (is_ep11_aes_key(key, key_size)) {
+		if (key_size == 2 * EP11_KEY_SIZE &&
+		    is_ep11_aes_key(key + EP11_KEY_SIZE,
+					  key_size - EP11_KEY_SIZE))
 			return true;
 	}
 
@@ -1585,6 +1649,7 @@ int get_key_bit_size(const u8 *key, size_t key_size, size_t *bitsize)
 {
 	struct aesdatakeytoken *datakey = (struct aesdatakeytoken *)key;
 	struct aescipherkeytoken *cipherkey = (struct aescipherkeytoken *)key;
+	struct ep11keytoken *ep11key = (struct ep11keytoken *)key;
 
 	util_assert(bitsize != NULL, "Internal error: bitsize is NULL");
 
@@ -1600,11 +1665,17 @@ int get_key_bit_size(const u8 *key, size_t key_size, size_t *bitsize)
 			*bitsize = cipherkey->pl - 384;
 		else
 			*bitsize = 0; /* Unknown */
-		if (key_size > cipherkey->length) {
+		if (key_size == 2 * AESCIPHER_KEY_SIZE) {
 			cipherkey = (struct aescipherkeytoken *)(key +
-					cipherkey->length);
+					AESCIPHER_KEY_SIZE);
 			if (cipherkey->pfv == 0x00) /* V0 payload */
 				*bitsize += cipherkey->pl - 384;
+		}
+	} else if (is_ep11_aes_key(key, key_size)) {
+		*bitsize = ep11key->head.keybitlen;
+		if (key_size == 2 * EP11_KEY_SIZE) {
+			ep11key = (struct ep11keytoken *)(key + EP11_KEY_SIZE);
+			*bitsize += ep11key->head.keybitlen;
 		}
 	} else {
 		return -EINVAL;
@@ -1627,7 +1698,8 @@ const char *get_key_type(const u8 *key, size_t key_size)
 		return KEY_TYPE_CCA_AESDATA;
 	if (is_cca_aes_cipher_key(key, key_size))
 		return KEY_TYPE_CCA_AESCIPHER;
-
+	if (is_ep11_aes_key(key, key_size))
+		return KEY_TYPE_EP11_AES;
 	return NULL;
 }
 
@@ -1647,8 +1719,46 @@ int get_min_card_level_for_keytype(const char *key_type)
 		return 3;
 	if (strcasecmp(key_type, KEY_TYPE_CCA_AESCIPHER) == 0)
 		return 6;
+	if (strcasecmp(key_type, KEY_TYPE_EP11_AES) == 0)
+		return 7;
 
 	return -1;
+}
+
+const struct fw_version *get_min_fw_version_for_keytype(const char *key_type)
+{
+	static const struct fw_version ep11_fw_version = {
+			.major = 0, .minor = 0, .api_ordinal = 4, };
+
+	if (key_type == NULL)
+		return NULL;
+
+	if (strcasecmp(key_type, KEY_TYPE_EP11_AES) == 0)
+		return &ep11_fw_version;
+
+	return NULL;
+}
+
+/**
+ * Returns the card type required for a specific key type
+ *
+ * @param[in] key_type       the type of the key
+ *
+ * @returns the card type, or CARD_TYPE_ANY for unknown key types
+ */
+enum card_type get_card_type_for_keytype(const char *key_type)
+{
+	if (key_type == NULL)
+		return CARD_TYPE_ANY;
+
+	if (strcasecmp(key_type, KEY_TYPE_CCA_AESDATA) == 0)
+		return CARD_TYPE_CCA;
+	if (strcasecmp(key_type, KEY_TYPE_CCA_AESCIPHER) == 0)
+		return CARD_TYPE_CCA;
+	if (strcasecmp(key_type, KEY_TYPE_EP11_AES) == 0)
+		return CARD_TYPE_EP11;
+
+	return CARD_TYPE_ANY;
 }
 
 /**
@@ -1679,10 +1789,6 @@ int check_aes_cipher_key(const u8 *key, size_t key_size)
 	if ((cipherkey->kuf1 & 0x4000) == 0) {
 		printf("WARNING: The secure key can not be used for "
 		       "decryption\n");
-		mismatch = true;
-	}
-	if (cipherkey->kuf1 & 0x2000) {
-		printf("INFO: The secure key can be used for data translate\n");
 		mismatch = true;
 	}
 	if (cipherkey->kuf1 & 0x1000) {
@@ -1787,3 +1893,169 @@ int check_aes_cipher_key(const u8 *key, size_t key_size)
 
 	return mismatch ? -EINVAL : 0;
 }
+
+static int reencipher_cca_secure_key(struct cca_lib *cca, u8 *secure_key,
+				     size_t secure_key_size, const char *apqns,
+				     u8 *mkvp, enum reencipher_method method,
+				     bool *apqn_selected, bool verbose)
+{
+	unsigned int flags;
+	int rc;
+
+	if (method == REENCIPHER_OLD_TO_CURRENT)
+		flags = FLAG_SEL_CCA_MATCH_OLD_MKVP;
+	else
+		flags = FLAG_SEL_CCA_MATCH_CUR_MKVP |
+			FLAG_SEL_CCA_NEW_MUST_BE_SET;
+
+	*apqn_selected = true;
+
+	rc = select_cca_adapter_by_mkvp(cca, mkvp, apqns, flags,
+					verbose);
+	if (rc == -ENOTSUP) {
+		rc = 0;
+		*apqn_selected = false;
+	}
+	if (rc != 0) {
+		pr_verbose(verbose, "No APQN found that is suitable "
+			   "for re-enciphering this secure key");
+		return rc;
+	}
+
+	rc = key_token_change(cca, secure_key, secure_key_size,
+			      method == REENCIPHER_OLD_TO_CURRENT ?
+					      METHOD_OLD_TO_CURRENT :
+					      METHOD_CURRENT_TO_NEW,
+			      verbose);
+	if (rc != 0) {
+		pr_verbose(verbose, "Failed to re-encipher secure key: "
+			   "%s", strerror(-rc));
+		return rc;
+	}
+
+	return 0;
+}
+
+static int reencipher_ep11_secure_key(struct ep11_lib *ep11, u8 *secure_key,
+				      size_t secure_key_size, const char *apqns,
+				      u8 *mkvp, bool *apqn_selected,
+				      bool verbose)
+{
+	unsigned int card, domain;
+	unsigned int flags;
+	target_t target;
+	int rc;
+
+	flags = FLAG_SEL_EP11_MATCH_CUR_MKVP |
+		FLAG_SEL_EP11_NEW_MUST_BE_SET;
+
+	*apqn_selected = true;
+
+	rc = select_ep11_apqn_by_mkvp(ep11, mkvp, apqns, flags,
+				     &target, &card, &domain, verbose);
+	if (rc == -ENOTSUP) {
+		rc = 0;
+		*apqn_selected = false;
+	}
+	if (rc != 0) {
+		pr_verbose(verbose, "No APQN found that is suitable "
+			   "for re-enciphering this secure key");
+		return rc;
+	}
+
+	rc = reencipher_ep11_key(ep11, target, card, domain,
+				 secure_key, secure_key_size, verbose);
+	free_ep11_target_for_apqn(ep11, target);
+	if (rc != 0) {
+		pr_verbose(verbose, "Failed to re-encipher secure key: "
+			   "%s", strerror(-rc));
+		return rc;
+	}
+
+	return 0;
+}
+
+
+/**
+ * Re-enciphers a secure key
+ *
+ * @param[in] lib           the external library struct
+ * @param[in] secure_key    a buffer containing the secure key
+ * @param[in] secure_key_size the secure key size
+ * @param[in] apqns         a comma separated list of APQNs. If NULL is
+ *                          specified, or an empty string, then all online
+ *                          APQNs of the matching type are subject to be used.
+ * @param[in] method        the re-encipher method
+ * @param[out] apqn_selected On return: true if a specific APQN was selected.
+ * @param[in] verbose       if true, verbose messages are printed
+ *
+ * @returns 0 on success, a negative errno in case of an error.
+ * -ENODEV is returned if no APQN could be found with a matching master key.
+ * -EIO is returned if the re-enciphering has failed.
+ */
+int reencipher_secure_key(struct ext_lib *lib, u8 *secure_key,
+			  size_t secure_key_size, const char *apqns,
+			  enum reencipher_method method, bool *apqn_selected,
+			  bool verbose)
+{
+	u8 mkvp[MKVP_LENGTH];
+	int rc;
+
+	util_assert(lib != NULL, "Internal error: lib is NULL");
+	util_assert(secure_key != NULL, "Internal error: secure_key is NULL");
+	util_assert(apqn_selected != NULL,
+		    "Internal error: apqn_selected is NULL");
+
+	*apqn_selected = true;
+
+	rc = get_master_key_verification_pattern(secure_key, secure_key_size,
+						 mkvp, verbose);
+	if (rc != 0) {
+		pr_verbose(verbose, "Failed to get the master key verification "
+			   "pattern: %s", strerror(-rc));
+		return rc;
+	}
+
+	if (is_ep11_aes_key(secure_key, secure_key_size)) {
+		/* EP11 secure key: need the EP11 host library */
+		if (lib->ep11->lib_ep11 == NULL) {
+			rc = load_ep11_library(lib->ep11, verbose);
+			if (rc != 0)
+				return rc;
+		}
+
+		if (method == REENCIPHER_OLD_TO_CURRENT) {
+			util_print_indented("ERROR: An APQN of a IBM "
+					    "cryptographic adapter in EP11 "
+					    "coprocessor mode does not have an "
+					    "OLD master key register. Thus, "
+					    "you can not re-encipher a secure "
+					    "key of type 'EP11-AES' from the "
+					    "OLD to the CURRENT master key "
+					    "register.\n", 0);
+			return -EINVAL;
+		}
+
+		rc = reencipher_ep11_secure_key(lib->ep11, secure_key,
+						secure_key_size, apqns, mkvp,
+						apqn_selected, verbose);
+	} else if (is_cca_aes_data_key(secure_key, secure_key_size) ||
+		   is_cca_aes_cipher_key(secure_key, secure_key_size)) {
+		/* CCA secure key: need the CCA host library */
+		if (lib->cca->lib_csulcca == NULL) {
+			rc = load_cca_library(lib->cca, verbose);
+			if (rc != 0)
+				return rc;
+		}
+
+		rc = reencipher_cca_secure_key(lib->cca, secure_key,
+					       secure_key_size, apqns, mkvp,
+					       method, apqn_selected, verbose);
+	} else {
+		pr_verbose(verbose, "Invalid key type");
+		rc = -EINVAL;
+	}
+
+	return rc;
+}
+

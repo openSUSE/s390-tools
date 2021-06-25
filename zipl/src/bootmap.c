@@ -21,6 +21,8 @@
 #include "lib/zt_common.h"
 #include "lib/util_part.h"
 #include "lib/util_path.h"
+#include "boot/s390.h"
+#include "stage3.h"
 
 #include "boot.h"
 #include "bootmap.h"
@@ -507,7 +509,8 @@ add_ipl_program(int fd, struct job_ipl_data* ipl, disk_blockptr_t* program,
 	size_t stage3_params_size;
 	const char *comp_name[10];
 	size_t signature_size;
-	int offset, flags = 0;
+	int offset;
+	uint64_t flags = 0;
 	void *stage3_params;
 	struct stat stats;
 	void *signature;

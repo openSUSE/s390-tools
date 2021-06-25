@@ -15,6 +15,9 @@
 
 #include "lib/zt_common.h"
 
+#include "cca.h"
+#include "ep11.h"
+
 /*
  * Definitions for the /dev/pkey kernel module interface
  */
@@ -25,11 +28,17 @@ struct tokenheader {
 	u8  res1[3];
 } __packed;
 
-#define TOKEN_TYPE_NON_CCA	0x00
-#define TOKEN_TYPE_CCA_INTERNAL	0x01
+#define TOKEN_TYPE_NON_CCA		0x00
+#define TOKEN_TYPE_CCA_INTERNAL		0x01
 
-#define TOKEN_VERSION_AESDATA	0x04
-#define TOKEN_VERSION_AESCIPHER	0x05
+/* CCA-Internal token versions */
+#define TOKEN_VERSION_AESDATA		0x04
+#define TOKEN_VERSION_AESCIPHER		0x05
+
+/* Non-CCA token versions */
+#define TOKEN_VERSION_PROTECTED_KEY	0x01
+#define TOKEN_VERSION_CLEAR_KEY		0x02
+#define TOKEN_VERSION_EP11_AES		0x03
 
 struct aesdatakeytoken {
 	u8  type;     /* TOKEN_TYPE_INTERNAL (0x01) for internal key token */
@@ -80,11 +89,40 @@ struct aescipherkeytoken {
 	u8  varpart[80]; /* variable part */
 } __packed;
 
+struct ep11keytoken {
+	union {
+		u8 session[32];
+		struct {
+			u8  type;      /* TOKEN_TYPE_NON_CCA (0x00) */
+			u8  res0;      /* unused */
+			u16 length;    /* length of token */
+			u8  version;   /* TOKEN_VERSION_EP11_AES (0x03) */
+			u8  res1;      /* unused */
+			u16 keybitlen; /* clear key bit len, 0 for unknown */
+		} head;
+	};
+	u8  wkvp[16]; /* wrapping key verification pattern */
+	u64 attr;     /* boolean key attributes */
+	u64 mode;     /* mode bits */
+	u16 version;  /* 0x1234, ep11 blob struct version */
+	u8  iv[14];
+	u8  encrypted_key_data[144];
+	u8  mac[32];
+	u8  padding[64];
+} __packed;
+
 #define AESDATA_KEY_SIZE	sizeof(struct aesdatakeytoken)
 #define AESCIPHER_KEY_SIZE	sizeof(struct aescipherkeytoken)
+#define EP11_KEY_SIZE		sizeof(struct ep11keytoken)
 
-#define MAX_SECURE_KEY_SIZE	MAX(AESDATA_KEY_SIZE, AESCIPHER_KEY_SIZE)
-#define MIN_SECURE_KEY_SIZE	MIN(AESDATA_KEY_SIZE, AESCIPHER_KEY_SIZE)
+/* MAX/MIN from zt_common.h produces warnings for variable length arrays */
+#define _MIN(a, b)  ((a) < (b) ? (a) : (b))
+#define _MAX(a, b)  ((a) > (b) ? (a) : (b))
+
+#define MAX_SECURE_KEY_SIZE	_MAX(EP11_KEY_SIZE, \
+				     _MAX(AESDATA_KEY_SIZE, AESCIPHER_KEY_SIZE))
+#define MIN_SECURE_KEY_SIZE	_MIN(EP11_KEY_SIZE, \
+				     _MIN(AESDATA_KEY_SIZE, AESCIPHER_KEY_SIZE))
 
 struct pkey_seckey {
 	u8  seckey[AESDATA_KEY_SIZE];  /* the secure key blob */
@@ -136,6 +174,7 @@ struct pkey_verifykey {
 enum pkey_key_type {
 	PKEY_TYPE_CCA_DATA   = (u32) 1,
 	PKEY_TYPE_CCA_CIPHER = (u32) 2,
+	PKEY_TYPE_EP11       = (u32) 3,
 };
 
 enum pkey_key_size {
@@ -226,10 +265,30 @@ struct pkey_apqns4keytype {
 
 #define KEY_TYPE_CCA_AESDATA        "CCA-AESDATA"
 #define KEY_TYPE_CCA_AESCIPHER      "CCA-AESCIPHER"
+#define KEY_TYPE_EP11_AES           "EP11-AES"
 
+#define DEFAULT_KEYBITS             256
 #define PAES_BLOCK_SIZE             16
 #define ENC_ZERO_LEN                (2 * PAES_BLOCK_SIZE)
 #define VERIFICATION_PATTERN_LEN    (2 * ENC_ZERO_LEN + 1)
+
+#define MKVP_LENGTH		16
+
+static const u8 zero_mkvp[MKVP_LENGTH] = { 0x00 };
+
+#define MKVP_EQ(mkvp1, mkvp2)	(memcmp(mkvp1, mkvp2, MKVP_LENGTH) == 0)
+#define MKVP_ZERO(mkvp)		(mkvp == NULL || MKVP_EQ(mkvp, zero_mkvp))
+
+enum card_type {
+	CARD_TYPE_ANY	= -1,
+	CARD_TYPE_CCA   = 1,
+	CARD_TYPE_EP11  = 2,
+};
+
+struct ext_lib {
+	struct cca_lib *cca;
+	struct ep11_lib *ep11;
+};
 
 int open_pkey_device(bool verbose);
 
@@ -257,14 +316,27 @@ int generate_key_verification_pattern(const u8 *key, size_t key_size,
 				      char *vp, size_t vp_len, bool verbose);
 
 int get_master_key_verification_pattern(const u8 *key, size_t key_size,
-					u64 *mkvp, bool verbose);
+					u8 *mkvp, bool verbose);
 
 bool is_cca_aes_data_key(const u8 *key, size_t key_size);
 bool is_cca_aes_cipher_key(const u8 *key, size_t key_size);
+bool is_ep11_aes_key(const u8 *key, size_t key_size);
 bool is_xts_key(const u8 *key, size_t key_size);
 int get_key_bit_size(const u8 *key, size_t key_size, size_t *bitsize);
 const char *get_key_type(const u8 *key, size_t key_size);
 int get_min_card_level_for_keytype(const char *key_type);
+const struct fw_version *get_min_fw_version_for_keytype(const char *key_type);
+enum card_type get_card_type_for_keytype(const char *key_type);
 int check_aes_cipher_key(const u8 *key, size_t key_size);
+
+enum reencipher_method {
+	REENCIPHER_OLD_TO_CURRENT = 1,
+	REENCIPHER_CURRENT_TO_NEW = 2,
+};
+
+int reencipher_secure_key(struct ext_lib *lib, u8 *secure_key,
+			  size_t secure_key_size, const char *apqns,
+			  enum reencipher_method method, bool *apqn_selected,
+			  bool verbose);
 
 #endif

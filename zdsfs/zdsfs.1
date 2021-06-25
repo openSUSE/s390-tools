@@ -32,23 +32,29 @@ Only read access is supported.
 
 Data sets on tape devices are not supported.
 
-To maintain data consistency, a DASD must not be modified while it is
-in use by zdsfs. This can be assured by varying the device offline
-in z/OS before setting it online in Linux.
+If the z/OSMF REST services are not used for a coordinated-read
+access, access to the device by Linux is not subject to RACF or any
+other z/OS auditing mechanism. Ensure the security of the data on the
+device by using the well-known Linux methods. By default, zdsfs grants
+access to the files in the fuse file system only to the user who
+started the tool. Configure file access behavior by using the
+‘allow_other’, ‘default_permissions’, ‘umask’, ‘uid’, and ‘gid’
+options.
 
-The access to the device by Linux is not subject to RACF or any other
-z/OS auditing mechanism. The safety of the data on the device must be
-established by the respective Linux mechanisms. The default behavior
-of zdsfs is to grant access to the files in the fuse file system only
-to the user who has started the tool. This behavior can be
-configured by using the options `allow_other', `default_permissions',
-`umask', `uid', and `gid'.
+When using the z/OSMF REST services for coordinated read access, every
+file open establishes a connection to the z/OSMF REST server. This
+checks that the accessing z/OS user ID has the appropriate access
+rights for the data set. Using this mechanism, an exclusive ENQ is
+obtained that marks the data set as in-use to z/OS. An ENQ is a z/OS
+method to control a serially reusable resource. While the ENQ is held,
+no z/OS application can modify the data set. If the ENQ cannot be
+obtained, the access attempt from Linux fails.
 
 Only physical sequential (PS) and partitioned data sets (PDS) are
 supported. Supported record formats are: V, F, U, B, S, A, and M.
 
-The file system is limited to basic operations (readdir, stat, open,
-read, seek). Because the actual size of the data in each track is not
+The file system is limited to basic operations: readdir, stat, open,
+read, and seek. Because the actual size of the data in each track is not
 always known, zdsfs does not support mmap. Seek operations read the
 whole data set to the given offset. The performance of seek
 operations to previous offsets can be improved by buffering seek
@@ -59,11 +65,11 @@ cannot provide exact file sizes. As a heuristic, the given file sizes
 are the maximum possible data sizes, based on the number and size of
 the extents that belong to each data set. When the actual end of the
 data is reached during read, the usual end of file (EOF) is returned.
-To make sure that the EOF is passed to the user correctly, the option
+To ensure that the EOF is passed to the user correctly, the option
 `-o direct_io' is set by zdsfs implicitly.
 
-The detection of incomplete multi volume data sets does not work for
-data sets for which only the first volume (device) is present.
+Incomplete multi-volume data sets are not detected if only the first
+volume (device) of the data set is present.
 
 .SH OPTIONS
 .SS "general options:"
@@ -89,7 +95,7 @@ Print version information, then exit.
 \fB\-l\fR \fI<device_list>\fR
 The specified file \fI<device_list>\fR contains a list of device
 nodes, separated by white space (space, tab or new line). All device
-nodes in this file are mounted as if given directly via the command
+nodes in this file are mounted as if specified directly via the command
 line.
 .TP
 \fB\-o\fR rdw
@@ -119,9 +125,9 @@ standard error stream.
 \fB\-o\fR tracks=\fI<n>\fR
 Size of the track buffer in tracks. The default for \fI<n>\fR is 128.
 
-The data that is read from the DASD has to be stored in a buffer, because
+The data that is read from the DASD must be stored in a buffer, because
 the minimum size for a read operation in raw access mode is one track,
-and the user data has to be extracted from the track images.  Reading
+and the user data must be extracted from the track images.  Reading
 more than one track at a time improves the overall performance, but
 requires larger buffers.
 
@@ -154,7 +160,55 @@ read from the beginning of the data set.
 
 .TP
 \fB\-o\fR check_host_count
-Stop processing if the device is used by another operating system instance.
+Stop processing if the device is used by another operating system
+instance.
+
+.TP
+\fB\-c\fR \fI<config_file>\fR
+Provide a configuration file for zdsfs. The default is /etc/zdsfs.conf.
+
+.TP
+\fB\-o\fR restapi
+Use z/OSMF REST services for coordinated read-access to data sets. The
+user credentials are read from the .netrc file in the user's home
+directory, or from the location the NETRC environment variable points
+to.
+
+.TP
+\fB\-o\fR restserver=<server_URL>
+Specify up to three server URLs to z/OSMF REST services. If more than
+one server is specified, the first that responds is used. If a server
+does not respond any longer during operation all specified server are probed again.
+
+.TP
+\fB\-x\fR \fI<dataset_file>\fR
+Use a config file with code-page conversion options for
+specific data sets.
+
+.TP
+\fB\-o\fR codepage_convert
+Enable code-page conversion for all data sets. Unless specified
+otherwise, the source code-page is EBCDIC CP1047 and the target
+code-page is UTF-8.
+
+You can change the default for the source code-page with the -o
+codepage_from option and for the target code-page with the -o
+codepage_to option. To specify source and target code-pages for
+individual data sets use a data set config file.
+
+.TP
+\fB\-o\fR codepage_from=\fI<n>\fR
+Override EBCDIC CP1047 as the default code-page for the source. Must
+be combined with \fB\-o\fR codepage_to=\fI<n>\fR. Overrides settings
+in a data set config file. Issue iconv -l for a list of valid
+specifications for <n>.
+
+.TP
+\fB\-o\fR codepage_to=\fI<n>\fR
+Override UTF-8 as the default code-page for the target. Must be
+combined with \fB\-o\fR codepage_from=\fI<n>\fR. Overrides settings
+in a data set configu file. Issue iconv -l for a list of valid
+specifications for <n>.
 
 .SS "Applicable FUSE options (version 2.8):"
 This is a selected subset of all FUSE options. Use the zdsfs
@@ -220,11 +274,10 @@ by z/OS.
 dsn=<data set name>,recfm=<fmt>,lrecl=<size>,dsorg=<org>
 
 \fBdsn\fR: The data set name.
-For physical sequential data sets this is the
-same name as the file name in the mount directory. For partitioned
-data sets (PDS) this is the same as the directory name in the mount
-directory. For PDS members the member name is placed in parentheses
-after the PDS name.
+For physical sequential data sets, this is the same as the file name in the mount directory. For partitioned
+data sets (PDS), this is the same as the directory name in the mount
+directory. For PDS members, the member name is placed after the PDS
+name, in parentheses.
 
 \fBrecfm\fR: The record format.
 
@@ -243,6 +296,81 @@ directory:
 \fBuser.lrecl\fR: The logical record length.
 
 \fBuser.dsorg\fR: The data set organization of a file.
+
+.SH zdsfs config file
+
+The default path is /etc/zdsfs.conf. Specify a different zdsfs config
+file location with the \fB\-c\fR \fI<config_file>\fR option.
+.br
+The config file may contain the following options:
+.PP
+
+.B restapi
+=
+.IR 0 / 1
+.IP
+Determines whether the z/OSMF REST services should be used. If
+enabled, a valid REST server must be specified, as well as a .netrc
+file with a valid z/OS user ID and password.
+.PP
+
+.B restserver
+=
+.IR URL
+.IP
+Specifies the address of the z/OSMF REST server that is used for
+coordinating read-access. For failover scenarios, provide up to three
+different server addresses. These will be tried in the specified order
+when one of the servers cannot be reached during mount or operation.
+.PP
+
+.B keepalive
+=
+.I timeout (in seconds)
+.IP
+Optionally change the keepalive timer for ENQs. By default the
+keepalive refreshes the access after 540 seconds (9 minutes).The 9
+minutes are chosen to prevent a timeout by z/OS after 10 minutes.
+
+.SH data-set config file <dataset_file>
+Provides code-page conversion settings for individual data sets.
+The default config file is /etc/zdsfs-dataset.conf. Use the \fB\-x\fR
+\fI<dataset_file>\fR option to specify a different file.
+.br
+Each config-file entry must contain the following options:
+.PP
+
+.B
+DATASET.TITLE
+.IP
+Specifies the data-set title or a pattern of titles to which the entry
+applies. The title can have a trailing asterisk to match all titles
+that begin with the leading characters.
+.PP
+
+.B conv
+=
+.IR 0 / 1 / <codepage_from>,<codepage_to>
+.IP
+\fI0\fR disables code-page conversion.
+.br
+\fI1\fR performs conversion with the default conversion table.
+.br
+An explicit specification of source and target code-page overrides the default conversion tables
+The code-page specifications must be separated by a comma.
+Issue iconv -l for a list of valid code-page specifications.
+
+.PP
+
+.B rdw
+=
+.I 0 / 1
+.IP
+\fI0\fR omits the record descriptor word from the data stream.
+.br
+\fI1\fR keeps the record descriptor word from the data stream.
+.br
+Code-page conversion can render data unreadable if the record descriptor word is kept.
 
 
 .SH EXAMPLES
@@ -270,6 +398,19 @@ To list all extended attributes of file FOOBAR.TEST.TXT
 assuming the z/OS disk was mounted on /mnt:
 
   # getfattr -d /mnt/FOOBAR.TEST.TXT
+.br
+
+To mount the z/OS disk using the z/OSMF REST services for coordinated
+read access:
+
+ # ./zdsfs -o restapi -o restserver=zos1.server.tld/zosmf /dev/dasde /mnt/
+
+.br
+To mount the z/OS disk and enable code-page conversion for all data
+sets using a custom source and target code page:
+
+  # ./zdsfs -o codepage_from=CP037 -o codepage_to=ISO-8859-1 /dev/dasde /mnt/
+
 
 .SH SEE ALSO
 getfattr(1), fuse(8), z/OS DFSMS Using Data Sets,

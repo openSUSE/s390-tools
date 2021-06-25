@@ -3,7 +3,7 @@
  *
  * Local helper functions
  *
- * Copyright IBM Corp. 2017, 2018
+ * Copyright IBM Corp. 2017, 2020
  *
  * s390-tools is free software; you can redistribute it and/or modify
  * it under the terms of the MIT license. See LICENSE for details.
@@ -26,9 +26,18 @@ static inline void misc_print_missing_command(void)
 }
 
 /**
+ * Subcommand is missing
+ */
+static inline void misc_print_missing_sub_command(void)
+{
+	warnx("Subcommand is required");
+	util_prg_print_parse_error();
+}
+
+/**
  * Invalid command specified (for 'git' like tools)
  */
-void misc_print_invalid_command(const char *command)
+static void misc_print_invalid_command(const char *command)
 {
 	warnx("Invalid command '%s'", command);
 	util_prg_print_parse_error();
@@ -39,7 +48,7 @@ void misc_print_invalid_command(const char *command)
  *
  * @param[in] parm_name  Parameter string
  */
-void misc_print_required_parm(const char *parm_name)
+static void misc_print_required_parm(const char *parm_name)
 {
 	warnx("Parameter '%s' is required", parm_name);
 	util_prg_print_parse_error();

@@ -68,6 +68,25 @@ typedef void (*t_CSUACRD)(long *return_code,
 			  long *ressource_name_length,
 			  unsigned char *ressource_name);
 
+typedef void (*t_CSNBKTB2)(long *return_code,
+			   long *reason_code,
+			   long *exit_data_length,
+			   unsigned char *exit_data,
+			   long *rule_array_count,
+			   unsigned char *rule_array,
+			   long *clear_key_bit_length,
+			   unsigned char *clear_key_value,
+			   long *key_name_length,
+			   unsigned char *key_name,
+			   long *user_associated_data_length,
+			   unsigned char *user_associated_data,
+			   long *token_data_length,
+			   unsigned char *token_data,
+			   long *verb_data_length,
+			   unsigned char *verb_data,
+			   long *target_key_token_length,
+			   unsigned char *target_key_token);
+
 typedef void (*t_CSNBKTR2)(long *return_code,
 			   long *reason_code,
 			   long *exit_data_length,
@@ -112,6 +131,7 @@ struct cca_lib {
 	t_CSUACFQ dll_CSUACFQ;
 	t_CSUACRA dll_CSUACRA;
 	t_CSUACRD dll_CSUACRD;
+	t_CSNBKTB2 dll_CSNBKTB2;
 	t_CSNBKTR2 dll_CSNBKTR2;
 	t_CSNBRKA dll_CSNBRKA;
 	struct cca_version version;
@@ -123,13 +143,14 @@ int key_token_change(struct cca_lib *cca,
 		     u8 *secure_key, unsigned int secure_key_size,
 		     char *method, bool verbose);
 
-int select_cca_adapter(struct cca_lib *cca, int card, int domain, bool verbose);
+int select_cca_adapter(struct cca_lib *cca, unsigned int card,
+		       unsigned int domain, bool verbose);
 
 #define FLAG_SEL_CCA_MATCH_CUR_MKVP	0x01
 #define FLAG_SEL_CCA_MATCH_OLD_MKVP	0x02
 #define FLAG_SEL_CCA_NEW_MUST_BE_SET	0x80
 
-int select_cca_adapter_by_mkvp(struct cca_lib *cca, u64 mkvp, const char *apqns,
+int select_cca_adapter_by_mkvp(struct cca_lib *cca, u8 *mkvp, const char *apqns,
 			       unsigned int flags, bool verbose);
 
 void print_msg_for_cca_envvars(const char *key_name);

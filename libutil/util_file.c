@@ -282,6 +282,44 @@ int util_file_write_ull(unsigned long long val, int base, const char *fmt, ...)
 }
 
 /**
+ * Read a file and convert it to signed int according to given base
+ *
+ * @param[out] val      Buffer for value
+ * @param[in]  base     Base for conversion, either 8, 10, or 16
+ * @param[in]  fmt      Format string for generation of the path name
+ * @param[in]  ...      Parameters for format string
+ *
+ * @retval     0        Integer has been read correctly
+ * @retval    -1        Error while reading file
+ */
+int util_file_read_i(int *val, int base, const char *fmt, ...)
+{
+	char path[PATH_MAX], buf[512];
+	va_list ap;
+	int count;
+
+	/* Construct the file name */
+	UTIL_VSPRINTF(path, fmt, ap);
+
+	if (file_gets(buf, sizeof(buf), path))
+		return -1;
+	switch (base) {
+	case 8:
+		count = sscanf(buf, "%do", val);
+		break;
+	case 10:
+		count = sscanf(buf, "%dd", val);
+		break;
+	case 16:
+		count = sscanf(buf, "%dx", val);
+		break;
+	default:
+		util_panic("Invalid base: %d\n", base);
+	}
+	return (count == 1) ? 0 : -1;
+}
+
+/**
  * Read a file and convert it to signed long according to given base
  *
  * @param[out] val      Buffer for value
@@ -350,6 +388,44 @@ int util_file_read_ll(long long *val, int base, const char *fmt, ...)
 		break;
 	case 16:
 		count = sscanf(buf, "%llx", val);
+		break;
+	default:
+		util_panic("Invalid base: %d\n", base);
+	}
+	return (count == 1) ? 0 : -1;
+}
+
+/**
+ * Read a file and convert it to unsigned int according to given base
+ *
+ * @param[out] val      Buffer for value
+ * @param[in]  base     Base for conversion, either 8, 10, or 16
+ * @param[in]  fmt      Format string for generation of the path name
+ * @param[in]  ...      Parameters for format string
+ *
+ * @retval     0        Integer has been read correctly
+ * @retval    -1        Error while reading file
+ */
+int util_file_read_ui(unsigned int *val, int base, const char *fmt, ...)
+{
+	char path[PATH_MAX], buf[512];
+	va_list ap;
+	int count;
+
+	/* Construct the file name */
+	UTIL_VSPRINTF(path, fmt, ap);
+
+	if (file_gets(buf, sizeof(buf), path))
+		return -1;
+	switch (base) {
+	case 8:
+		count = sscanf(buf, "%uo", val);
+		break;
+	case 10:
+		count = sscanf(buf, "%uu", val);
+		break;
+	case 16:
+		count = sscanf(buf, "%ux", val);
 		break;
 	default:
 		util_panic("Invalid base: %d\n", base);
@@ -431,4 +507,32 @@ int util_file_read_ull(unsigned long long *val, int base, const char *fmt, ...)
 		util_panic("Invalid base: %d\n", base);
 	}
 	return (count == 1) ? 0 : -1;
+}
+
+/**
+ * Read a file and convert it according to format string
+ *
+ * @param[in]  path     File name to read
+ * @param[in]  fmt      Format string for parsing the content
+ * @param[out] ...      Parameters for format string
+ *
+ * @retval     != -1    Number of values parsed correctly
+ * @retval    -1        Error while reading file
+ */
+
+int util_file_read_va(const char *path, const char *fmt, ...)
+{
+	char buf[512];
+	va_list ap;
+	int ret;
+
+	if (file_gets(buf, sizeof(buf), path))
+		return -1;
+
+	va_start(ap, fmt);
+	ret = vsscanf(buf, fmt, ap);
+	va_end(ap);
+	if (ret == EOF)
+		return -1;
+	return ret;
 }

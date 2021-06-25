@@ -9,13 +9,15 @@
  * it under the terms of the MIT license. See LICENSE for details.
  */
 
+#include "libc.h"
+
 #include <stdarg.h>
 
-#include "lib/zt_common.h"
+#include "boot/s390.h"
 
 #include "error.h"
-#include "libc.h"
 #include "sclp.h"
+#include "ebcdic.h"
 
 extern char __heap_start[];
 extern char __heap_stop[];
@@ -30,9 +32,10 @@ struct ex_table_entry {
 };
 
 #define MEM_ALLOC_START	((unsigned long) __heap_start)
-#define MEM_ALLOC_CNT 4
+#define MEM_ALLOC_END	((unsigned long) __heap_stop)
+#define MEM_ALLOC_MAX 4
 
-static uint8_t mem_page_alloc_vec[MEM_ALLOC_CNT];
+static uint8_t mem_page_alloc_vec[MEM_ALLOC_MAX];
 
 /*
  * Initialize memory with value
@@ -127,174 +130,287 @@ int strncmp(const char *s1, const char *s2, unsigned long count)
 	return 0;
 }
 
-/*
- * Convert number to string
- *
- * Parameters:
- *
- * - buf:   Output buffer
- * - base:  Base used for formatting (e.g. 10 or 16)
- * - val:   Number to format
- * - zero:  If > 0, fill with leading zeros, otherwise use blanks
- * - count: Minimum number of characters used for output string
- */
-static int num_to_str(char *buf, int base, unsigned long val, int zero,
-		      unsigned long count)
+static int skip_atoi(const char **c)
 {
-	static const char conv_vec[] = {'0', '1', '2', '3', '4', '5', '6', '7',
-					'8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
-	unsigned long num = 0, val_work = val, in_number = 1;
-	int i;
+	int i = 0;
 
-	/* Count number of characters needed for number */
 	do {
-		num++;
-		val_work /= base;
-	} while (val_work);
-	/* Real character number overwrites count */
-	if (count < num)
-		count = num;
-	/* Format number */
-	for (i = count - 1; i >= 0; i--) {
-		if (in_number) {
-			buf[i] = conv_vec[val % base];
-			val /= base;
-			in_number = val ? 1 : 0;
-		} else {
-			buf[i] = zero ? '0' : ' ';
-		}
+		i = i*10 + *((*c)++) - '0';
+	} while (isdigit(**c));
+
+	return i;
+}
+
+enum format_type {
+	FORMAT_TYPE_NONE,
+	FORMAT_TYPE_STR,
+	FORMAT_TYPE_ULONG,
+};
+
+struct printf_spec {
+	unsigned int	type:8;		/* format_type enum */
+	signed int	field_width:24;	/* width of output field */
+	unsigned int	zeropad:1;	/* pad numbers with zero */
+	unsigned int	base:8;		/* number base, 8, 10 or 16 only */
+	signed int	precision:16;	/* # of digits/chars */
+};
+
+#define FIELD_WIDTH_MAX ((1 << 23) - 1)
+
+static int format_decode(const char *fmt, struct printf_spec *spec)
+{
+	const char *start = fmt;
+
+	spec->type = FORMAT_TYPE_NONE;
+	while (*fmt) {
+		if (*fmt == '%')
+			break;
+		fmt++;
 	}
-	buf[count] = 0;
-	return count;
-}
 
-/*
- * Convert string to string with indentation
- */
-static int str_to_str(char *buf, const char *str, unsigned long count)
-{
-	unsigned long size;
+	/* return current non-format string */
+	if (fmt != start || !*fmt)
+		return fmt - start;
 
-	size = strlen(str);
-	if (count < size)
-		count = size;
-	else
-		memset(buf, ' ', count - size);
-	strcpy(buf + (count - size), str);
-	return count;
-}
-
-/*
- * Convert string to number with given base
- */
-unsigned long strtoul(const char *nptr, char **endptr, int base)
-{
-	unsigned long val = 0;
-
-	while (isdigit(*nptr)) {
-		if (val != 0)
-			val *= base;
-		val += *nptr - '0';
-		nptr++;
+	/* first char is '%', skip it */
+	fmt++;
+	if (*fmt == '0') {
+		spec->zeropad = 1;
+		fmt++;
 	}
-	if (endptr)
-		*endptr = (char *) nptr;
-	return val;
-}
 
-/*
- * Convert ebcdic string to number with given base
- */
-unsigned long ebcstrtoul(char *nptr, char **endptr, int base)
-{
-	unsigned long val = 0;
+	spec->field_width = -1;
+	if (isdigit(*fmt))
+		spec->field_width = skip_atoi(&fmt);
 
-	while (ebc_isdigit(*nptr)) {
-		if (val != 0)
-			val *= base;
-		val += *nptr - 0xf0;
-		nptr++;
+	spec->precision = -1;
+	if (*fmt == '.') {
+		fmt++;
+		if (isdigit(*fmt))
+			spec->precision = skip_atoi(&fmt);
 	}
-	if (endptr)
-		*endptr = (char *) nptr;
-	return val;
-}
 
-/*
- * Convert string to number with given base
- */
-static int sprintf_fmt(char type, char *buf, unsigned long val, int zero,
-		       int count)
-{
-	switch (type) {
+	/* always use long form, i.e. ignore long qualifier */
+	if (*fmt == 'l')
+		fmt++;
+
+	switch (*fmt) {
 	case 's':
-		return str_to_str(buf, (const char *) val, count);
-	case 'x':
-		return num_to_str(buf, 16, val, zero, count);
+		spec->type = FORMAT_TYPE_STR;
+		break;
+
+	case 'o':
+		spec->base = 8;
+		spec->type = FORMAT_TYPE_ULONG;
+		break;
+
 	case 'u':
-		return num_to_str(buf, 10, val, zero, count);
+		spec->base = 10;
+		spec->type = FORMAT_TYPE_ULONG;
+		break;
+
+	case 'x':
+		spec->base = 16;
+		spec->type = FORMAT_TYPE_ULONG;
+		break;
+
 	default:
 		libc_stop(EINTERNAL);
 	}
-	return 0;
+
+	return ++fmt - start;
 }
 
-/*
- * Print formated string (va version)
- */
-static void vsprintf(char *str, const char *fmt, va_list va)
+static char *string(char *buf, char *end, const char *s,
+		    struct printf_spec *spec)
 {
-	unsigned long val, zero, count;
-	char *fmt_next;
+	int limit = spec->precision;
+	int len = 0;
+	int spaces;
 
+	/* Copy string to buffer */
+	while (limit--) {
+		char c = *s++;
+		if (!c)
+			break;
+		if (buf < end)
+			*buf = c;
+		buf++;
+		len++;
+	}
+
+	/* right align if necessary */
+	if (len < spec->field_width && buf < end) {
+		spaces = spec->field_width - len;
+		if (spaces >= end - buf)
+			spaces = end - buf;
+		memmove(buf + spaces, buf, len);
+		memset(buf, ' ', spaces);
+		buf += spaces;
+	}
+
+	return buf;
+}
+
+static char *number(char *buf, char *end, unsigned long val,
+		    struct printf_spec *spec)
+{
+	/* temporary buffer to prepare the string.
+	 * Worst case: base = 8 -> 3 bits per char -> 2.67 chars per byte */
+	char tmp[3 * sizeof(val)];
+	static const char vec[] = {'0', '1', '2', '3', '4', '5', '6', '7',
+				   '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+	int field_width = spec->field_width;
+	int precision = spec->precision;
+	int len;
+
+	/* prepare string in reverse order */
+	len = 0;
 	do {
-		if (*fmt == '%') {
-			fmt++;
-			if (*fmt == '0') {
-				zero = 1;
-				fmt++;
-			} else {
-				zero = 0;
-			}
-			/* No number found by strtoul: count=0 fmt_next=fmt */
-			count = strtoul(fmt, &fmt_next, 10);
-			fmt = fmt_next;
-			if (*fmt == 'l')
-				fmt++;
-			val = va_arg(va, unsigned long);
-			str += sprintf_fmt(*fmt, str, val, zero, count);
-			fmt++;
-		} else {
-			*str++ = *fmt++;
-		}
-	} while (*fmt);
-	*str = 0;
+		tmp[len++] = vec[val % spec->base];
+		val /= spec->base;
+	} while (val);
+
+	if (len > precision)
+		precision = len;
+
+	field_width -= precision;
+	while (field_width-- > 0) {
+		char c = spec->zeropad ? '0' : ' ';
+		if (buf < end)
+			*buf = c;
+		buf++;
+	}
+
+	/* needed if no field width but a precision is given */
+	while (len < precision--) {
+		if (buf < end)
+			*buf = '0';
+		buf++;
+	}
+
+	while (len-- > 0) {
+		if (buf < end)
+			*buf = tmp[len];
+		buf++;
+	}
+
+	return buf;
 }
 
 /*
- * Write formated string to string
+ * vsnprintf - Format string and place in a buffer
+ *
+ * This funcion only supports a subset of format options defined in the
+ * C standard, i.e.
+ * specifiers:
+ *	* %s (strings)
+ *	* %o (unsigned int octal)
+ *	* %u (unsigned int decimal)
+ *	* %x (unsigned int hexadecimal)
+ *
+ * length modifier:
+ *	* 'l' (ignored, see below)
+ *
+ * flag:
+ *	* '0' (zero padding for integers)
+ *
+ * precision and field width as integers, i.e. _not_ by asterix '*'.
+ *
+ * The integer specifiers (o, u and, x) always use the long form, i.e.
+ * assume the argument to be of type 'unsigned long int'.
+ *
+ * Returns the number of characters the function would have generated for
+ * the given input (excluding the trailing '\0'. If the return value is
+ * greater than or equal @size the resulting string is trunctuated.
  */
-void sprintf(char *str, const char *fmt, ...)
+static int vsnprintf(char *buf, unsigned long size, const char *fmt,
+		     va_list args)
+{
+	struct printf_spec spec = {0};
+	char *str, *end;
+
+	str = buf;
+	end = buf + size;
+
+	/* use negative (large positive) buffer sizes as indication for
+	 * unknown/unlimited buffer sizes. */
+	if (end < buf) {
+		end = ((void *)-1);
+		size = end - buf;
+	}
+
+	while (*fmt) {
+		const char *old_fmt = fmt;
+		int read = format_decode(fmt, &spec);
+		int copy;
+
+		fmt += read;
+
+		switch (spec.type) {
+		case FORMAT_TYPE_NONE:
+			copy = read;
+			if (str < end) {
+				if (copy > end - str)
+					copy = end - str;
+				memcpy(str, old_fmt, copy);
+			}
+			str += read;
+			break;
+
+		case FORMAT_TYPE_STR:
+			str = string(str, end, va_arg(args, char *), &spec);
+			break;
+
+		case FORMAT_TYPE_ULONG:
+			str = number(str, end, va_arg(args, unsigned long),
+				     &spec);
+			break;
+		}
+	}
+
+	if (size) {
+		if (str < end)
+			*str = '\0';
+		else
+			end[-1] = '\0';
+	}
+	return str - buf;
+}
+
+/*
+ * Write formatted string to buffer
+ */
+void snprintf(char *buf, unsigned long size, const char *fmt, ...)
 {
 	va_list va;
 
 	va_start(va, fmt);
-	vsprintf(str, fmt, va);
+	vsnprintf(buf, size, fmt, va);
 	va_end(va);
 }
 
 /*
- * Print formated string
+ * Print formatted string to console
  */
 void printf(const char *fmt, ...)
 {
-	char buf[81];
+	char buf[LINE_LENGTH + 1];
+	int len;
 	va_list va;
 
 	va_start(va, fmt);
-	vsprintf(buf, fmt, va);
-	sclp_print(buf);
+	len = vsnprintf(buf, sizeof(buf), fmt, va);
+	if (len > LINE_LENGTH) {
+		buf[LINE_LENGTH - 1] = '.';
+		buf[LINE_LENGTH - 2] = '.';
+		buf[LINE_LENGTH - 3] = '.';
+	}
 	va_end(va);
+	sclp_print(buf);
+#ifdef ENABLE_SCLP_ASCII
+	sclp_print_ascii(buf);
+#endif /* ENABLE_SCLP_ASCII */
 }
 
 /*
@@ -302,10 +418,11 @@ void printf(const char *fmt, ...)
  */
 unsigned long get_zeroed_page(void)
 {
+	const int page_count = MIN(MEM_ALLOC_MAX, (int)((MEM_ALLOC_END - MEM_ALLOC_START) / PAGE_SIZE));
 	unsigned long addr;
 	int i;
 
-	for (i = 0; i < MEM_ALLOC_CNT; i++) {
+	for (i = 0; i < page_count; i++) {
 		if (mem_page_alloc_vec[i] != 0)
 			continue;
 		addr = MEM_ALLOC_START + i * PAGE_SIZE;
@@ -321,6 +438,9 @@ unsigned long get_zeroed_page(void)
  */
 void free_page(unsigned long addr)
 {
+	if (addr < MEM_ALLOC_START || addr >= MEM_ALLOC_END)
+		libc_stop(EINTERNAL);
+
 	mem_page_alloc_vec[(addr - MEM_ALLOC_START) / PAGE_SIZE] = 0;
 }
 
@@ -385,7 +505,7 @@ void initialize(void)
 /*
  * Load disabled wait PSW with reason code in address field
  */
-void __noreturn libc_stop(unsigned long reason)
+void libc_stop(unsigned long reason)
 {
 	struct psw_t psw;
 

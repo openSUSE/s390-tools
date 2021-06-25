@@ -1,4 +1,3 @@
-
 s390-tools
 ==========
 
@@ -30,6 +29,9 @@ Package contents
 
  * dasdinfo:
    Display unique DASD ID, either UID or volser.
+
+ * genprotimg:
+   Create a protected virtualization image.
 
  * udev rules:
    - 59-dasd.rules: rules for unique DASD device nodes created in /dev/disk/.
@@ -241,6 +243,23 @@ Package contents
    Provides simple tools to create a binary that can be used to implement
    simple network boot setups following the PXELINUX conventions.
 
+ * libekmfweb:
+   A shared library that provides functions to communicate with an EKMF Web
+   server via REST calls over HTTPS. EKMF Web stands for IBM Enterprise Key
+   Management Foundation - Web Edition, and is used to manage keys in an
+   enterprise.
+
+ * hsci:
+   Manage HiperSockets Converged Interfaces (HSCI).
+
+ * hsavmcore:
+   hsavmcore is designed to make the dump process with kdump more efficient.
+   With hsavmcore, the HSA memory that contains a part of the production
+   kernel's memory can be released early in the process. Depending on the size
+   of the production kernel's memory, writing the dump to persistent storage
+   can be time consuming and prevent the HSA memory from being reused
+   by other LPARs.
+
 For more information refer to the following publications:
 
   * "Device Drivers, Features, and Commands" chapter "Useful Linux commands"
@@ -259,22 +278,27 @@ build options:
 
 | __LIBRARY__    | __BUILD OPTION__   | __TOOLS__                             |
 |----------------|:------------------:|:-------------------------------------:|
-| fuse           | `HAVE_FUSE`        | cmsfs-fuse, zdsfs, hmcdrvfs, zgetdump |
+| fuse           | `HAVE_FUSE`        | cmsfs-fuse, zdsfs, hmcdrvfs, zgetdump,|
+|                |                    | hsavmcore                             |
 | zlib           | `HAVE_ZLIB`        | zgetdump, dump2tar                    |
 | ncurses        | `HAVE_NCURSES`     | hyptop                                |
 | pfm            | `HAVE_PFM`         | cpacfstats                            |
 | net-snmp       | `HAVE_SNMP`        | osasnmpd                              |
 | glibc-static   | `HAVE_LIBC_STATIC` | zfcpdump                              |
-| openssl        | `HAVE_OPENSSL`     | zkey                                  |
+| openssl        | `HAVE_OPENSSL`     | genprotimg, zkey, libekmfweb          |
 | cryptsetup     | `HAVE_CRYPTSETUP2` | zkey-cryptsetup                       |
-| json-c         | `HAVE_JSONC`       | zkey-cryptsetup                       |
+| json-c         | `HAVE_JSONC`       | zkey-cryptsetup, libekmfweb           |
+| glib2          | `HAVE_GLIB2`       | genprotimg                            |
+| libcurl        | `HAVE_LIBCURL`     | genprotimg, libekmfweb                |
+| systemd        | `HAVE_SYSTEMD`     | hsavmcore                             |
 
 This table lists additional build or install options:
 
-| __COMPONENT__  | __OPTION__       | __TOOLS__                       |
-|----------------|:----------------:|:-------------------------------:|
-| dracut         | `HAVE_DRACUT`    | zdev                            |
-| initramfs-tools| `HAVE_INITRAMFS` | zdev                            |
+| __COMPONENT__    | __OPTION__                   | __TOOLS__      |
+|------------------|:----------------------------:|:--------------:|
+| dracut           | `HAVE_DRACUT`                | zdev           |
+| initramfs-tools  | `HAVE_INITRAMFS`             | zdev           |
+|                  | `ZDEV_ALWAYS_UPDATE_INITRD`  | zdev           |
 
 The s390-tools build process uses "pkg-config" if available and hard-coded
 compiler and linker options otherwise.
@@ -287,6 +311,14 @@ the different tools are provided:
 
 * dbginfo.sh:
   The tar package is required to archive collected data.
+
+* genprotimg:
+  For building genprotimg you need OpenSSL version 1.1.0 or newer
+  installed (openssl-devel.rpm). Also required is glib2
+  (glib2-devel.rpm). Tip: you may skip the genprotimg build by adding
+  `HAVE_OPENSSL=0` or `HAVE_GLIB2=0`.
+
+  The runtime requirements are: openssl-libs (>= 1.1.0) and glib2.
 
 * osasnmpd:
   You need at least the NET-SNMP 5.1.x package (net-snmp-devel.rpm)
@@ -357,6 +389,17 @@ the different tools are provided:
   Distributors with different boot or RAM-disk mechanisms should provide
   a custom zdev-root-update helper script.
 
+  - `ZDEV_ALWAYS_UPDATE_INITRD=1` upon modification of any persistent device
+    configuration, chzdev updates the initial RAM-disk by default, without any
+    additional user interaction.
+
+  For some distributions, all the configuration attributes must be copied to
+  the initial RAM-disk. Because the device configuration directives applied
+  in the initial RAM-disk takes precedence over those stored in the root file-
+  system. This copying is done usually by explicitly invoking a command. This
+  build option makes it user-friendly and does this copying without any manual
+  intervention.
+
   Some functions of zdev require that the following programs are available:
 
   - modprobe (kmod)
@@ -386,3 +429,18 @@ the different tools are provided:
   tool must be added to this group. The owner of the default key repository
   '/etc/zkey/repository' must be set to group 'zkeyadm' with write permission
   for this group.
+
+* libekmfweb:
+  For building the libekmfweb shared library you need openssl version 1.1.1 or
+  newer installed (openssl-devel.rpm). Also required are json-c version 0.13 or
+  newer (json-c-devel.rpm), and libcurl version 7.59 or newer
+  (libcurl-devel.rpm).
+  Tip: you may skip the libekmfweb build by adding `HAVE_OPENSSL=0`,
+  `HAVE_JSONC=0`, or `HAVE_LIBCURL=0` to the make invocation.
+
+* hsavmcore:
+  For building the hsavmcore tool you need fuse version 2.6 and optionally
+  systemd which is enabled by default, to disable systemd support,
+  add `HAVE_SYSTEMD=0` to the make invocation.
+  Tip: you may skip the hsavmcore build by adding `HAVE_FUSE=0`
+  to the make invocation.

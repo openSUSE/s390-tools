@@ -115,7 +115,7 @@
 #include "lib/util_base.h"
 #include "lib/util_list.h"
 #include "vtoc.h"
-
+#include <iconv.h>
 
 
 /**
@@ -191,6 +191,8 @@
 #define ENDTOKEN 0xFFFFFFFFFFFFFFFFULL
 
 
+#define MAX_LINE_LENGTH 512
+#define MAX_SERVER 3
 
 /**
  * @brief This structure represents the count field in an ECKD record.
@@ -833,6 +835,11 @@ int lzds_dshandle_set_seekbuffer(struct dshandle *dsh,
 				 unsigned long long seek_buffer_size);
 
 /**
+ * @brief Set iconv handle for codepage conversion.
+ */
+int lzds_dshandle_set_iconv(struct dshandle *dsh, iconv_t *iconv);
+
+/**
  * @brief Get the size of the data set in number of tracks (sum of all extents).
  */
 void lzds_dataset_get_size_in_tracks(struct dataset *ds,
@@ -854,6 +861,7 @@ int lzds_zdsroot_extract_datasets_from_dasd(struct zdsroot *root,
 
 void lzds_dslist_free(struct zdsroot *root);
 
+int lzds_ping_rest(struct dshandle *dsh, char *server);
 
 /** @} */ /* end of group libzds_functions_high */
 
@@ -878,6 +886,8 @@ int lzds_analyse_open_count(struct zdsroot *root, int warn);
 /** @} */ /* end of group libzds_functions_helper */
 
 
-
+int lzds_rest_get_enq(struct dshandle *dsh, char *server);
+int lzds_rest_release_enq(struct dshandle *dsh, char *server);
+int lzds_rest_ping(struct dshandle *dsh, char *server);
 
 #endif /* LIB_LIBZDS_H */

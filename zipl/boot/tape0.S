@@ -7,28 +7,23 @@
 # it under the terms of the MIT license. See LICENSE for details.
 #
 
+#include "boot/sigp.h"
+#include "boot/linux_layout.h"
+#include "boot/s390.h"
+
 IPL_BS			= 1024			# block size for tape access
 IPL_OFF			= 0x4000		# temporary kernel load addr
-COMMAND_LINE_SIZE	= 896			# max command line length
-KERNEL_OFF		= 0x10000		# kernel start code offset
+KERNEL_OFF		= IMAGE_ENTRY		# kernel start code offset
 						# relative to image start
 __LC_IO_NEW_PSW         = 0x1f0			# IO New PSW addr
 
-
-# Parameter address offsets
-
-PARMAREA		= 0x10400		# Parameter area offset
-IPL_DEVICE		= 0x10400		# IPL device offset
-INITRD_START		= 0x10408		# ramdisk addr offset
-INITRD_SIZE		= 0x10410		# ramdisk size offset
-COMMAND_LINE		= 0x10480		# command line offset
 
 # Default IPL parameter - will be overwritten by zIPL
 
 RAMDISK_ORIGIN		= 0x800000		# default ramdisk load addr
 RAMDISK_SIZE		= 0x800000		# default ramdisk size
 PARMFILE_ADDR		= 0x1000		# default parmfile load addr
-KERNEL_ADDR		= 0x10000		# default kernel load addr
+KERNEL_ADDR		= IMAGE_ENTRY		# default kernel load addr
 
 
 	.org 0x0
@@ -37,7 +32,7 @@ _start:
 
 # Stage 0 loader - loads first block of this loader
 
-	.long 0x00080000,0x80000000+iplstart	# PSW to start execution
+	.quad PSW_LOAD+iplstart			# PSW to start execution
 	.long 0x27000000,0x60000001		# backward Space Block
 	.long 0x02000000,0x20000000+IPL_BS	# read IPL_BS bytes to addr 0
 
@@ -63,7 +58,7 @@ _parm_addr:
 _initrd_addr:
 	.quad RAMDISK_ORIGIN			# ramdisk load address
 _load_psw:
-	.quad 0x0008000080000000+KERNEL_ADDR	# kernel start PSW
+	.quad PSW_LOAD+KERNEL_ADDR		# kernel start PSW
 
 #
 # Subroutine to load from tape until tape mark
@@ -184,10 +179,10 @@ iplstart:
 0:
 	la      %r7,2                           #/* First try code 2: */
 	la      %r6,0                           #/* 64 bit psws are restored */
-	sigp    %r7,%r6,0x12                    #/* Switch to 64 bit */
+	sigp    %r7,%r6,SIGP_SET_ARCHITECTURE   #/* Switch to 64 bit */
 	bc      8,.Lswitched_64-0b(%r13)        #/* Accepted ? */
 	la      %r7,1                           #/* Failed - try code 1 */
-	sigp    %r7,%r6,0x12                    #/* Switch to 64 bit */
+	sigp    %r7,%r6,SIGP_SET_ARCHITECTURE   #/* Switch to 64 bit */
 .Lswitched_64:
 	sam64                                   #/* Switch to 64 bit addr mode */
 	basr    %r13,0

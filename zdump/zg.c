@@ -280,6 +280,9 @@ off_t zg_seek(struct zg_fh *zg_fh, off_t off, enum zg_check check)
 {
 	off_t rc;
 
+	if (off >= zg_fh->sb.st_size)
+		ERR_EXIT("Trying to seek past file end \"%s\"", zg_fh->path);
+
 	rc = lseek(zg_fh->fh, off, SEEK_SET);
 	if (rc == -1 && check != ZG_CHECK_NONE)
 		ERR_EXIT_ERRNO("Could not seek \"%s\"", zg_fh->path);
@@ -432,7 +435,7 @@ char *zg_devnode_create(dev_t dev)
 	char *file_path;
 	unsigned int i;
 
-	for (i = 0; i < ARRAY_ELEMENT_CNT(dir_vec); i++) {
+	for (i = 0; i < ARRAY_SIZE(dir_vec); i++) {
 		if (dir_vec[i] == NULL)
 			continue;
 		file_path = devnode_create_dir(dir_vec[i], dev);

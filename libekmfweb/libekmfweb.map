@@ -1,0 +1,30 @@
+LIBEKMFWEB_1.0 {
+    global:
+        ekmf_get_server_cert_chain;
+        ekmf_print_certificates;
+        ekmf_check_login_token;
+        ekmf_login;
+        ekmf_generate_identity_key;
+        ekmf_reencipher_identity_key;
+        ekmf_generate_csr;
+        ekmf_generate_ss_cert;
+        ekmf_get_public_key;
+        ekmf_get_settings;
+        ekmf_check_feature;
+        ekmf_retrieve_key;
+        ekmf_list_templates;
+        ekmf_get_template;
+        ekmf_get_last_seq_no;
+        ekmf_clone_template_info;
+        ekmf_free_template_info;
+        ekmf_list_keys;
+        ekmf_get_key_info;
+        ekmf_set_key_state;
+        ekmf_set_key_tags;
+        ekmf_delete_key_tags;
+        ekmf_clone_key_info;
+        ekmf_free_key_info;
+        ekmf_generate_key;
+        ekmf_curl_destroy;
+    local: *;
+};

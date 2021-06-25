@@ -17,6 +17,8 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 
+#include "stage3.h"
+
 #include "../boot/data.h"
 #include "boot.h"
 #include "bootmap.h"
@@ -79,13 +81,13 @@ boot_check_data(void)
 int
 boot_get_stage3_parms(void **buffer, size_t *bytecount, address_t parm_addr,
 		      address_t initrd_addr, size_t initrd_len,
-		      address_t entry, int extra_parm, uint16_t flags,
+		      address_t entry, int extra_parm, uint64_t flags,
 		      address_t image_addr, size_t image_len)
 {
-	struct boot_stage3_params params;
+	struct stage3_parms params;
 	void* data;
 
-	if (entry != (entry & PSW_ADDRESS_MASK)) {
+	if (entry != (entry & PSW32_ADDR_MASK)) {
 		error_reason("Kernel image entry point to high (31 bit "
 			     "addressing mode)");
 		return -1;
@@ -236,7 +238,7 @@ boot_get_tape_ipl(void** data, size_t* size, address_t parm_addr,
 	struct boot_tape_ipl_params params;
 	void* buffer;
 
-	if (image_addr != (image_addr & PSW_ADDRESS_MASK)) {
+	if (image_addr != (image_addr & PSW32_ADDR_MASK)) {
 		error_reason("Kernel image load address to high (31 bit "
 			     "addressing mode)");
 		return -1;

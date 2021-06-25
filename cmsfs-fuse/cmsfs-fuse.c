@@ -299,7 +299,7 @@ static unsigned long dec_to_hex(unsigned long long num)
 {
 	unsigned long res;
 
-	asm volatile("cvb %0,%1" : "=d" (res) : "m" (num));
+	asm volatile("cvb %0,%1" : "=d" (res) : "Q" (num));
 	return res & 0xffffffff;
 }
 
@@ -307,7 +307,7 @@ static unsigned int hex_to_dec(unsigned int num)
 {
 	unsigned long long res;
 
-	asm volatile("cvd %1,%0" : "=m" (res) : "d" (num));
+	asm volatile("cvd %1,%0" : "=Q" (res) : "d" (num));
 	return res & 0xffffffff;
 }
 
@@ -2050,7 +2050,7 @@ static int update_dir_levels(int blocks)
 	if (blocks < 2)
 		return 0;
 
-	while (blocks / (PTRS_PER_BLOCK + 1)) {
+	while (blocks / PTRS_PER_BLOCK) {
 		levels++;
 		blocks /= PTRS_PER_BLOCK;
 	}
@@ -3103,7 +3103,7 @@ static void update_levels(struct file *f)
 		return;
 	}
 
-	while (blocks / (per_block + 1)) {
+	while (blocks / per_block) {
 		levels++;
 		blocks /= per_block;
 	}

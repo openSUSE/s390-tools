@@ -12,15 +12,17 @@
 #ifndef COMMON_H
 #define COMMON_H
 
+#include "lib/zt_common.h"
+
+#define DESCR_PER_BLOCK         _AC(16, U)
+
+
+#ifndef __ASSEMBLER__
+
+#include "libc.h"
+#include "boot/s390.h"
 #include "cio.h"
 #include "error.h"
-#include "libc.h"
-#include "s390.h"
-
-#define DESCR_PER_BLOCK         16
-
-/* ADRESS */
-#define STAGE2_DESC 0x78
 
 /* Layout of ECKD disk block pointer */
 struct eckd_blockptr {
@@ -74,6 +76,6 @@ int extract_length(void *);
 int is_zero_block(void *);
 void kdump_stage2(unsigned long);
 
+#endif /* __ASSEMBLER__ */
 
 #endif /* COMMON_H */
-

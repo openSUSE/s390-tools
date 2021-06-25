@@ -21,6 +21,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <curl/curl.h>
+#include <time.h>
+#include <signal.h>
+
+#include <iconv.h>
 
 #ifdef HAVE_SETXATTR
 #include <linux/xattr.h>
@@ -31,11 +36,18 @@
 #include "lib/zt_common.h"
 
 #define COMP "zdsfs: "
+
 #define METADATAFILE "metadata.txt"
 
 /* defaults for file and directory permissions (octal) */
 #define DEF_FILE_PERM 0440
 #define DEF_DIR_PERM 0550
+/* default timer interval 9 minutes, enq times out after 10 minutes */
+#define DEFAULT_KEEPALIVE_SEC	         540
+
+#define SECTION_ENTRIES 3
+static char CODEPAGE_EDF[] = "CP1047";
+static char CODEPAGE_LINUX[] = "UTF-8";
 
 struct zdsfs_info {
 	int devcount;
@@ -50,11 +62,30 @@ struct zdsfs_info {
 	size_t metasize; /* total size of meta data buffer */
 	size_t metaused; /* how many bytes of buffer are already filled */
 	time_t metatime; /* when did we create this meta data */
+	char *configfile;
+	int restapi;
+	unsigned int nr_server;
+	int active_server;
+	char *server[MAX_SERVER];
+	long keepalive;
+	int codepage_convert;
+	char *codepage_from;
+	char *codepage_to;
+	iconv_t iconv;
+	struct util_list *dsclist;
+	char *dsfile;
 };
 
 static struct zdsfs_info zdsfsinfo;
 static int zdsfs_create_meta_data_buffer(struct zdsfs_info *);
 static int zdsfs_verify_datasets(void);
+static struct util_list *open_dsh;
+static int timer_running;
+
+struct dsh_node {
+	struct util_list_node node;
+	struct dshandle *dsh;
+};
 
 struct zdsfs_file_info {
 	struct dshandle *dsh;
@@ -64,7 +95,139 @@ struct zdsfs_file_info {
 	size_t metaread; /* how many bytes have already been read */
 };
 
+struct dsconvert {
+	char *name;
+	char *codepage_from;
+	char *codepage_to;
+	bool keeprdw;
+};
 
+struct dsc_node {
+	struct util_list_node node;
+	struct dsconvert *dsc;
+};
+
+/* Allocate and initialize a new list of struct dsh_node. */
+static struct util_list *dshlist_alloc(void)
+{
+	struct util_list *list;
+
+	list = util_malloc(sizeof(struct util_list));
+	util_list_init(list, struct dsh_node, node);
+
+	return list;
+}
+
+/* free list of struct dsh_node. */
+static void dshlist_free(struct util_list *list)
+{
+	struct dsh_node *s, *n;
+
+	if (!list)
+		return;
+
+	util_list_iterate_safe(list, s, n) {
+		util_list_remove(list, s);
+		free(s);
+	}
+
+	free(list);
+}
+
+/* add dsh to list */
+static void dshlist_add(struct util_list *list, struct dshandle *dsh)
+{
+	struct dsh_node *s;
+
+	s = util_malloc(sizeof(struct dsh_node));
+	s->dsh = dsh;
+	util_list_add_tail(list, s);
+}
+
+/* Find a dsh_node. */
+static struct dsh_node *dshlist_find(struct util_list *list, struct dshandle *dsh)
+{
+	struct dsh_node *s;
+
+	util_list_iterate(list, s) {
+		if (s->dsh == dsh)
+			return s;
+	}
+
+	return NULL;
+}
+
+/* Remove a dsh_node from the list. */
+void dshlist_remove(struct util_list *list, struct dshandle *dsh)
+{
+	struct dsh_node *p;
+
+	p = dshlist_find(list, dsh);
+	if (p) {
+		util_list_remove(list, p);
+		free(p);
+	}
+}
+
+/* Allocate and initialize a new list of struct dsc_node. */
+static struct util_list *dsclist_alloc(void)
+{
+	struct util_list *list;
+
+	list = util_malloc(sizeof(struct util_list));
+	util_list_init(list, struct dsc_node, node);
+
+	return list;
+}
+
+/* free struct dsconvert. */
+static void dsc_free(struct dsconvert *dsc)
+{
+	free(dsc->name);
+	free(dsc->codepage_from);
+	free(dsc->codepage_to);
+	free(dsc);
+}
+
+/* free list of struct dsc_node. */
+static void dsclist_free(struct util_list *list)
+{
+	struct dsc_node *s, *n;
+
+	if (!list)
+		return;
+
+	util_list_iterate_safe(list, s, n) {
+		util_list_remove(list, s);
+		dsc_free(s->dsc);
+		free(s);
+	}
+
+	free(list);
+}
+
+/* add dsc to list */
+static void dsclist_add(struct util_list *list, struct dsconvert *dsc)
+{
+	struct dsc_node *s;
+
+	s = util_malloc(sizeof(struct dsc_node));
+	s->dsc = dsc;
+	util_list_add_tail(list, s);
+}
+
+/* Find a dsc_node by name. */
+static struct dsc_node *dsclist_find_by_name(struct util_list *list, char *name)
+{
+	struct dsc_node *s;
+
+	util_list_iterate(list, s) {
+		if (strcmp(s->dsc->name, name) == 0)
+			return s;
+	}
+
+	return NULL;
+}
 
 /* normalize the given path name to a dataset name
  * so that we can compare it to the names in the vtoc. This means:
@@ -97,7 +260,57 @@ static void path_to_member_name(const char *path, char *normds, size_t size)
 	}
 }
 
+static int setup_iconv(iconv_t *conv, const char *from, const char *to)
+{
+	*conv = iconv_open(to, from);
+	if (*conv == ((iconv_t) -1)) {
+		fprintf(stderr, "error when setting up iconv\n");
+		return -1;
+	}
+	return 0;
+}
 
+static void setup_timer(long sec)
+{
+	static struct itimerval timer;
+
+	memset(&timer, 0, sizeof(struct itimerval));
+	timer.it_value.tv_sec = sec;
+	setitimer(ITIMER_REAL, &timer, NULL);
+}
+
+static void keep_alive(int UNUSED(signal))
+{
+	struct dsh_node *s;
+
+	if (!open_dsh) {
+		timer_running = 0;
+		setup_timer(0);
+		return;
+	}
+
+	util_list_iterate(open_dsh, s) {
+		lzds_rest_ping(s->dsh,
+			       zdsfsinfo.server[zdsfsinfo.active_server]);
+	}
+	timer_running = 1;
+	setup_timer(zdsfsinfo.keepalive);
+}
+
+void keepalive_start(void)
+{
+	struct sigaction act;
+
+	if (!open_dsh || timer_running)
+		return;
+
+	timer_running = 1;
+	/* Setup timer for periodic ping. */
+	memset(&act, 0, sizeof(struct sigaction));
+	act.sa_handler = &keep_alive;
+	sigaction(SIGALRM, &act, NULL);
+	setup_timer(zdsfsinfo.keepalive);
+}
 
 static int zdsfs_getattr(const char *path, struct stat *stbuf)
 {
@@ -375,6 +588,139 @@ static int zdsfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	return 0;
 }
 
+/*
+ * walk through the serverlist and check if the URLs start with http or https
+ * if not attach a https:// prefix
+ * also check if they end with / and if not attach it
+ *
+ * afterwards ping the z/OSMF server and use the first working one
+ *
+ * return 1 if working server found 0 otherwise
+ */
+static int zdsfs_test_restserver(void)
+{
+	unsigned int i;
+	char *server;
+	char *prefix;
+
+	for (i = 0; i < zdsfsinfo.nr_server; i++) {
+		server = zdsfsinfo.server[i];
+		if (strncmp(server, "http", 4)) {
+			prefix = util_strdup("https://");
+			server = util_strcat_realloc(prefix, server);
+			free(zdsfsinfo.server[i]);
+			zdsfsinfo.server[i] = server;
+		}
+		if (strncmp(server + strlen(server) - 1, "/", 1)) {
+			server = util_strcat_realloc(server, "/");
+			zdsfsinfo.server[i] = server;
+		}
+		if (lzds_rest_ping(NULL, zdsfsinfo.server[i])) {
+			zdsfsinfo.active_server = i;
+			fprintf(stdout, "Using z/OSMF REST services on %s\n",
+				zdsfsinfo.server[i]);
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/*
+ * check if a dsconvert entry exists that match the given DS name
+ * if the dsconvert entry ends in an asterisk only match the prefix
+ * otherwise look for an exact match
+ */
+static struct dsconvert *zdsfs_get_matching_dsc(char *name)
+{
+	struct dsconvert *dsc;
+	unsigned int length;
+	struct dsc_node *n;
+	char *match;
+
+	util_list_iterate(zdsfsinfo.dsclist, n) {
+		dsc = n->dsc;
+		match = dsc->name;
+		length = strlen(match);
+		if (strcmp(&match[length - 1], "*") == 0)
+			length--;
+		else if (strlen(name) != length)
+			continue;
+
+		if (strncmp(name, match, length) == 0)
+			return dsc;
+	}
+	return NULL;
+}
+
+/*
+ * Setup iconv conversion for a given dataset.
+ * The codepage settings can be obtained from (in descending priority)
+ *   - globally set codepage settings
+ *   - a dsconvert entry matching the DS name
+ *   - default codepage settings.
+ */
+static int zdsfs_setup_conversion(struct dshandle *dsh, struct dataset *ds)
+{
+	struct dsconvert *dsc;
+	const char *from, *to;
+	struct errorlog *log;
+	iconv_t *iconv;
+	char *dsname;
+	int rc;
+
+	from = to = NULL;
+	lzds_dataset_get_name(ds, &dsname);
+	dsc = zdsfs_get_matching_dsc(dsname);
+	/* the DS matches a dsconvert entry */
+	if (dsc) {
+		from = dsc->codepage_from;
+		to = dsc->codepage_to;
+	}
+
+	/* globally set conversion overwriting possible config file settings */
+	if (zdsfsinfo.codepage_from && zdsfsinfo.codepage_to) {
+		from = zdsfsinfo.codepage_from;
+		to = zdsfsinfo.codepage_to;
+	}
+
+	/*
+	 * globally set conversion using defaults
+	 * if not specified otherwise already
+	 */
+	if (zdsfsinfo.codepage_convert) {
+		if (!from)
+			from = CODEPAGE_EDF;
+		if  (!to)
+			to = CODEPAGE_LINUX;
+	}
+
+	/* no conversion */
+	if (!from || !to)
+		return 0;
+
+	iconv = util_malloc(sizeof(*iconv));
+	rc = setup_iconv(iconv, from, to);
+	if (rc) {
+		fprintf(stderr,	"Error when preparing iconv setting:\n");
+		lzds_dshandle_get_errorlog(dsh, &log);
+		lzds_errorlog_fprint(log, stderr);
+		rc = -rc;
+		goto out;
+	}
+	rc = lzds_dshandle_set_iconv(dsh, iconv);
+	if (rc) {
+		fprintf(stderr,	"Error when setting iconv handle:\n");
+		lzds_dshandle_get_errorlog(dsh, &log);
+		lzds_errorlog_fprint(log, stderr);
+		rc = -rc;
+		goto out;
+	}
+	return 0;
+out:
+	free(iconv);
+	return rc;
+}
+
 
 static int zdsfs_open(const char *path, struct fuse_file_info *fi)
 {
@@ -464,13 +810,33 @@ static int zdsfs_open(const char *path, struct fuse_file_info *fi)
 		rc = -rc;
 		goto error2;
 	}
+	zdsfs_setup_conversion(dsh, ds);
+
+retry:
+	if (zdsfsinfo.restapi && zdsfsinfo.active_server >= 0) {
+		rc = lzds_rest_get_enq(dsh,
+				  zdsfsinfo.server[zdsfsinfo.active_server]);
+		/* if the REST server is not responding try the other */
+		if (rc == ECONNREFUSED && zdsfs_test_restserver()) {
+			goto retry;
+		} else if (rc) {
+			lzds_dshandle_get_errorlog(dsh, &log);
+			lzds_errorlog_fprint(log, stderr);
+			rc = -rc;
+			goto error2;
+		} else {
+			dshlist_add(open_dsh, dsh);
+			/* add to open dsh list */
+			keepalive_start();
+		}
+	}
 	rc = lzds_dshandle_open(dsh);
 	if (rc) {
 		fprintf(stderr,	"Error when opening data set:\n");
 		lzds_dshandle_get_errorlog(dsh, &log);
 		lzds_errorlog_fprint(log, stderr);
 		rc = -rc;
-		goto error2;
+		goto error3;
 	}
 	zfi->is_metadata_file = 0;
 	zfi->metaread = 0;
@@ -478,12 +844,13 @@ static int zdsfs_open(const char *path, struct fuse_file_info *fi)
 	fi->fh = (uint64_t)(unsigned long)zfi;
 	return 0;
 
+error3:
+	dshlist_remove(open_dsh, dsh);
 error2:
 	lzds_dshandle_free(dsh);
 error1:
 	free(zfi);
 	return rc;
-
 }
 
 static int zdsfs_release(const char *UNUSED(path), struct fuse_file_info *fi)
@@ -495,7 +862,10 @@ static int zdsfs_release(const char *UNUSED(path), struct fuse_file_info *fi)
 		return -EINVAL;
 	zfi = (struct zdsfs_file_info *)(unsigned long)fi->fh;
 	if (zfi->dsh) {
+		lzds_rest_release_enq(zfi->dsh,
+				      zdsfsinfo.server[zdsfsinfo.active_server]);
 		lzds_dshandle_close(zfi->dsh);
+		dshlist_remove(open_dsh, zfi->dsh);
 		lzds_dshandle_free(zfi->dsh);
 	}
 	rc = pthread_mutex_destroy(&zfi->mutex);
@@ -831,6 +1201,11 @@ enum {
 	KEY_DEVFILE,
 	KEY_TRACKS,
 	KEY_SEEKBUFFER,
+	KEY_CONFIG,
+	KEY_DSCONFIG,
+	KEY_SERVER,
+	KEY_CODE_FROM,
+	KEY_CODE_TO,
 };
 
 #define ZDSFS_OPT(t, p, v) { t, offsetof(struct zdsfs_info, p), v }
@@ -843,9 +1218,16 @@ static const struct fuse_opt zdsfs_opts[] = {
 	FUSE_OPT_KEY("-l %s",		KEY_DEVFILE),
 	FUSE_OPT_KEY("tracks=",         KEY_TRACKS),
 	FUSE_OPT_KEY("seekbuffer=",     KEY_SEEKBUFFER),
+	FUSE_OPT_KEY("-c %s",           KEY_CONFIG),
+	FUSE_OPT_KEY("-x %s",           KEY_DSCONFIG),
+	FUSE_OPT_KEY("restserver=",     KEY_SERVER),
+	FUSE_OPT_KEY("codepage_from=",  KEY_CODE_FROM),
+	FUSE_OPT_KEY("codepage_to=",    KEY_CODE_TO),
 	ZDSFS_OPT("rdw",                keepRDW, 1),
 	ZDSFS_OPT("ignore_incomplete",  allow_inclomplete_multi_volume, 1),
 	ZDSFS_OPT("check_host_count",   host_count, 1),
+	ZDSFS_OPT("restapi",            restapi, 1),
+	ZDSFS_OPT("codepage_convert",   codepage_convert, 1),
 	FUSE_OPT_END
 };
 
@@ -865,6 +1247,10 @@ static void usage(const char *progname)
 "ZDSFS options:\n"
 "    -l list_file           Text file that contains a list of DASD device"
 " nodes\n"
+"    -c config_file         Text file that contains configuration options\n"
+"                           for zdsfs\n"
+"    -x ds_config_file      Text file that contains conversion options\n"
+"                           for specific datasets\n"
 "    -o rdw                 Keep record descriptor words in byte stream\n"
 "    -o ignore_incomplete   Continue processing even if parts of a multi"
 " volume\n"
@@ -874,6 +1260,14 @@ static void usage(const char *progname)
 "                           size (default 1048576)\n"
 "    -o check_host_count    Stop processing if the device is used by another\n"
 "                           operating system instance\n"
+"    -o restapi             Enable using z/OSMF REST services for coordinated\n"
+"                           access to datasets\n"
+"    -o restserver=URL      The URL of the z/OSMF REST server to be used for\n"
+"                           coordinated access to datasets\n"
+"    -o codepage_convert    Enable codepage conversion using default codepages\n"
+"                           from 'CP1047' to 'UTF-8'\n"
+"    -o codepage_from=from  Set codepage for source. See 'iconv -l' for a list\n"
+"    -o codepage_to=to      Set codepage for target. See 'iconv -l' for a list\n"
 		, progname);
 }
 
@@ -973,6 +1367,223 @@ static void zdsfs_process_device_file(const char *devfile)
 	free(buffer);
 }
 
+void remove_whitespace(const char *s, char *t)
+{
+	while (*s != '\0') {
+		if (!isblank(*s)) {
+			*t = *s;
+			t++;
+		}
+		s++;
+	}
+	*t = '\0';
+}
+
+static void zdsfs_process_config_file(const char *config)
+{
+	char line[MAX_LINE_LENGTH];
+	char *tmp, *key, *value;
+	FILE *fd;
+	char delimiter[] = " =#\n";
+	unsigned long enabled;
+
+	fd = fopen(config, "r");
+	if (!fd) {
+		fprintf(stderr, "could not open file %s: %s\n",
+			config, strerror(errno));
+		return;
+	}
+
+	while (fgets(line, sizeof(line), fd)) {
+		/* skip empty lines */
+		if (*line == '\n' || *line == '#')
+			continue;
+
+		/* remove all whitespaces */
+		tmp = util_malloc(strlen(line) + 1);
+		remove_whitespace(line, tmp);
+
+		key = strtok(tmp, delimiter);
+		if (strcmp(key, "restserver")  == 0) {
+			if (zdsfsinfo.nr_server >= MAX_SERVER) {
+				free(tmp);
+				continue;
+			}
+			value = strtok(NULL, delimiter);
+			zdsfsinfo.server[zdsfsinfo.nr_server] =
+				util_strdup(value);
+			zdsfsinfo.nr_server++;
+		} else if (strcmp(key, "restapi") == 0) {
+			value = strtok(NULL, delimiter);
+			enabled = strtoul(value, NULL, 0);
+			if (enabled == 1)
+				zdsfsinfo.restapi = true;
+		} else if (strcmp(key, "keepalive") == 0) {
+			value = strtok(NULL, delimiter);
+			zdsfsinfo.keepalive = strtoul(value, NULL, 0);
+		}
+		free(tmp);
+	}
+	fclose(fd);
+}
+
+static struct dsconvert *zdsfs_allocate_dsc(char *name, const char *config)
+{
+	struct dsconvert *dsc;
+
+	/* check for duplicate entries */
+	if (dsclist_find_by_name(zdsfsinfo.dsclist, name)) {
+		fprintf(stderr,
+			"Error in config file %s. Duplicate entry found: %s\n",
+			config, name);
+		return NULL;
+	}
+	dsc = util_zalloc(sizeof(*dsc));
+	dsc->name = util_strdup(name);
+
+	return dsc;
+}
+
+static int zdsfs_check_codepage_setting(char *from, char *to)
+{
+	iconv_t iconv;
+
+	/* no conversion is OK */
+	if (!from && !to)
+		return 0;
+
+	/* partial setup is not OK */
+	if ((from && !to) || (to && !from))
+		return 1;
+
+	/* return if the codepages are valid */
+	return setup_iconv(&iconv, from, to);
+}
+
+/*
+ * process a dataset configuration file that specifies conversion on a per dataset basis
+ *
+ * expect a section title each 3 lines
+ * the section should contain a rdw= and conv= line
+ * valid values for rdw= are 0/1
+ * valid values for conv= are 0/1 or a comma separated list
+ * of codepage_from and codepage_to arguments
+ */
+static int zdsfs_process_dataset_conf(const char *config)
+{
+	char line[MAX_LINE_LENGTH];
+	char delimiter[] = " =#\n";
+	char *tmp, *key, *value;
+	int linecount, in_section;
+	unsigned long enabled;
+	struct dsconvert *dsc;
+	int rc = 1;
+	FILE *fd;
+
+	fd = fopen(config, "r");
+	if (!fd) {
+		fprintf(stderr, "could not open file %s: %s\n",
+			config, strerror(errno));
+		return 0;
+	}
+	in_section = 0;
+	linecount = 0;
+	dsc = NULL;
+	tmp = NULL;
+	while (fgets(line, sizeof(line), fd)) {
+		linecount++;
+		/* remove all whitespaces */
+		tmp = util_malloc(strlen(line) + 1);
+		remove_whitespace(line, tmp);
+		/* skip empty lines */
+		if (*tmp == '\n' || *tmp == '#') {
+			free(tmp);
+			tmp = NULL;
+			continue;
+		}
+		if (!in_section) {
+			/* the section title should not contain a '=' */
+			if (strchr(line, '=') != NULL) {
+				fprintf(stderr,
+					"Error in config file %s line %d. Expected section title instead of %s\n",
+					config, linecount, line);
+				goto out;
+			}
+		}
+		key = strtok(tmp, delimiter);
+		if (!in_section) {
+			dsc = zdsfs_allocate_dsc(key, config);
+			if (!dsc)
+				goto out;
+			in_section = SECTION_ENTRIES;
+		} else if (strcmp(key, "rdw")  == 0) {
+			value = strtok(NULL, delimiter);
+			enabled = strtoul(value, NULL, 0);
+			if (enabled == 1)
+				dsc->keeprdw = true;
+			else
+				dsc->keeprdw = false;
+		} else if (strcmp(key, "conv") == 0) {
+			value = strtok(NULL, delimiter);
+			if (strchr(value, ',') != NULL) {
+				/* use provided codepages */
+				value = strtok(value, ",");
+				dsc->codepage_from = util_strdup(value);
+				value = strtok(NULL, delimiter);
+				dsc->codepage_to = util_strdup(value);
+			} else if (strcmp(value, "1") == 0) {
+				/* use default codepages */
+				dsc->codepage_from = CODEPAGE_EDF;
+				dsc->codepage_to = CODEPAGE_LINUX;
+			} else if  (strcmp(value, "0") == 0) {
+				/* disable conversion */
+				dsc->codepage_from = NULL;
+				dsc->codepage_to = NULL;
+			} else {
+				fprintf(stderr,
+					"Error in config file %s line %d. Invalid 'conv' statement: %s.\n",
+					config, linecount, value);
+				goto out;
+			}
+		} else {
+			fprintf(stderr,
+				"Error in config file %s line %d. Missing 'rdw' or 'conv' statement.\n",
+				config, linecount);
+			goto out;
+		}
+		in_section--;
+		/* if the section was parsed completely, add the dsc to the list */
+		if (!in_section) {
+			if (zdsfs_check_codepage_setting(dsc->codepage_from,
+							 dsc->codepage_to)) {
+				fprintf(stderr,
+					"Error in config file %s. Invalid codepage setting: %s %s.\n",
+					config, dsc->codepage_from,
+					dsc->codepage_to);
+				goto out;
+			}
+			dsclist_add(zdsfsinfo.dsclist, dsc);
+			dsc = NULL;
+		}
+		free(tmp);
+		tmp = NULL;
+	}
+	/* find incomplete last section */
+	if (in_section)
+		fprintf(stderr,
+			"Error in config file %s. Missing 'rdw' or 'conv' statement.\n",
+			config);
+	else
+		rc = 0;
+
+out:
+	fclose(fd);
+	free(tmp);
+	dsc_free(dsc);
+
+	return rc;
+}
+
 static int zdsfs_process_args(void *UNUSED(data), const char *arg, int key,
 			      struct fuse_args *outargs)
 {
@@ -1057,6 +1668,32 @@ static int zdsfs_process_args(void *UNUSED(data), const char *arg, int key,
 			", program version %s\n", RELEASE_STRING);
 		fprintf(stdout, "Copyright IBM Corp. 2013, 2017\n");
 		exit(0);
+	case KEY_CONFIG:
+		/* note that arg starts with "-c" */
+		zdsfsinfo.configfile = util_strdup(arg + 2);
+		return 0;
+	case KEY_DSCONFIG:
+		/* note that arg starts with "-x" */
+		zdsfsinfo.dsfile = util_strdup(arg + 2);
+		return 0;
+	case KEY_SERVER:
+		if (zdsfsinfo.nr_server >= MAX_SERVER)
+			return 0;
+		value = arg + strlen("restserver=");
+		zdsfsinfo.server[zdsfsinfo.nr_server] =
+			util_strdup(value);
+		zdsfsinfo.nr_server++;
+		return 0;
+	case KEY_CODE_FROM:
+		value = arg + strlen("codepage_from=");
+		zdsfsinfo.codepage_from =
+			util_strdup(value);
+		return 0;
+	case KEY_CODE_TO:
+		value = arg + strlen("codepage_to=");
+		zdsfsinfo.codepage_to =
+			util_strdup(value);
+		return 0;
 	default:
 		fprintf(stderr, "Unknown argument key %x\n", key);
 		exit(1);
@@ -1069,13 +1706,21 @@ int main(int argc, char *argv[])
 	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
 	int rc;
 
+	timer_running = 0;
 	bzero(&zdsfsinfo, sizeof(zdsfsinfo));
 	zdsfsinfo.keepRDW = 0;
 	zdsfsinfo.allow_inclomplete_multi_volume = 0;
 	zdsfsinfo.tracks_per_frame = 128;
 	zdsfsinfo.seek_buffer_size = 1048576;
+	zdsfsinfo.configfile = "/etc/zdsfs.conf";
+	zdsfsinfo.dsfile = "/etc/zdsfs-dataset.conf";
+	zdsfsinfo.keepalive = DEFAULT_KEEPALIVE_SEC;
+	zdsfsinfo.active_server = -1;
 
 	rc = lzds_zdsroot_alloc(&zdsfsinfo.zdsroot);
+	open_dsh = dshlist_alloc();
+	zdsfsinfo.dsclist = dsclist_alloc();
+
 	if (rc) {
 		fprintf(stderr, "Could not allocate internal structures\n");
 		exit(1);
@@ -1085,7 +1730,19 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "Failed to parse option\n");
 		exit(1);
 	}
-
+	if (zdsfs_check_codepage_setting(zdsfsinfo.codepage_from,
+					 zdsfsinfo.codepage_to)) {
+		fprintf(stderr, "Ivalid codepage setting from '%s' to '%s'\n",
+			zdsfsinfo.codepage_from,
+			zdsfsinfo.codepage_to);
+		rc = -EINVAL;
+		goto cleanup;
+	}
+	zdsfs_process_config_file(zdsfsinfo.configfile);
+	if (zdsfs_process_dataset_conf(zdsfsinfo.dsfile)) {
+		rc = -EACCES;
+		goto cleanup;
+	}
 	if (!zdsfsinfo.devcount) {
 		fprintf(stderr, "Please specify a block device\n");
 		fprintf(stderr, "Try '%s --help' for more information\n",
@@ -1111,9 +1768,21 @@ int main(int argc, char *argv[])
 	if (rc)
 		goto cleanup;
 
+	if (zdsfsinfo.restapi) {
+		curl_global_init(CURL_GLOBAL_DEFAULT);
+		zdsfs_test_restserver();
+		if (zdsfsinfo.active_server < 0) {
+			fprintf(stderr, "Error: No z/OSMF REST Server reachable\n");
+			rc = -EACCES;
+			goto cleanup;
+		}
+	}
 	rc = fuse_main(args.argc, args.argv, &rdf_oper, NULL);
 
 cleanup:
+	curl_global_cleanup();
+	dshlist_free(open_dsh);
+	dsclist_free(zdsfsinfo.dsclist);
 	lzds_zdsroot_free(zdsfsinfo.zdsroot);
 
 	fuse_opt_free_args(&args);

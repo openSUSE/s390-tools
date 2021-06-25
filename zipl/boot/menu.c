@@ -12,6 +12,9 @@
 #include "libc.h"
 #include "menu.h"
 #include "sclp.h"
+#include "ebcdic.h"
+#include "boot/linux_layout.h"
+#include "boot/loaders_layout.h"
 
 static const char *msg_econfig = "Error: undefined configuration\n";
 
@@ -55,8 +58,8 @@ static int menu_read(void)
 		/* input under zVM needs to be converted to lower case */
 		if (is_zvm())
 			for (i = 0; i < count; i++)
-				temp_area[i] = ebc_tolower(temp_area[i]);
-		value = ebcstrtoul((char *)temp_area, &endptr, 10);
+				temp_area[i] = ebcdic_tolower(temp_area[i]);
+		value = ebcdic_strtoul((char *)temp_area, &endptr, 10);
 
 		if ((endptr != temp_area) && (value < BOOT_MENU_ENTRIES - 1) &&
 		    (__stage2_params.config[value] != 0)) {
@@ -112,7 +115,7 @@ static int menu_param(unsigned long *value)
 	int i;
 
 	if (!sclp_param(loadparm))
-		*value = ebcstrtoul(loadparm, &endptr, 10);
+		*value = ebcdic_strtoul(loadparm, &endptr, 10);
 
 	/* got number, done */
 	if (endptr != loadparm)
@@ -121,7 +124,7 @@ static int menu_param(unsigned long *value)
 	/* no number, check for keyword */
 	i = 0;
 	/* skip leading whitespaces */
-	while ((i < PARAM_SIZE) && ebc_isspace(loadparm[i]))
+	while ((i < PARAM_SIZE) && ecbdic_isspace(loadparm[i]))
 		i++;
 
 	if (!strncmp(&loadparm[i], "PROMPT", 6)) {
@@ -183,7 +186,7 @@ boot:
 			(void *)&__stage2_params + TEXT_OFFSET));
 
 	/* append 'BOOT_IMAGE=<num>' to parmline */
-	sprintf(endstring, " BOOT_IMAGE=%u", value);
+	snprintf(endstring, sizeof(endstring), " BOOT_IMAGE=%u", value);
 	if ((strlen(cmd_line_extra) + strlen(endstring)) < COMMAND_LINE_SIZE)
 		strcat(cmd_line_extra, endstring);
 

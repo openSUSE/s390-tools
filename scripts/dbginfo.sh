@@ -2,7 +2,7 @@
 #
 # dbginfo.sh - Tool to collect runtime, configuration, and trace information
 #
-# Copyright IBM Corp. 2002, 2018
+# Copyright IBM Corp. 2002, 2021
 #
 # s390-tools is free software; you can redistribute it and/or modify
 # it under the terms of the MIT license. See LICENSE for details.
@@ -21,7 +21,7 @@ readonly SCRIPTNAME="${0##*/}"
 print_version() {
     cat <<EOF
 ${SCRIPTNAME}: Debug information script version %S390_TOOLS_VERSION%
-Copyright IBM Corp. 2002, 2018
+Copyright IBM Corp. 2002, 2021
 EOF
 }
 
@@ -35,10 +35,10 @@ print_usage()
     cat <<EOF
 
 
-Usage: ${SCRIPTNAME} [OPTIONS]
+Usage: ${SCRIPTNAME} [OPTION]
 
-This script collects runtime, configuration and trace information about
-your Linux on System z installation for debugging purposes.
+This script collects runtime, configuration and trace information on
+a Linux on IBM Z installation for debugging purposes.
 
 It also traces information about z/VM if the Linux runs under z/VM.
 
@@ -65,16 +65,9 @@ Please report bugs to: linux390@de.ibm.com
 EOF
 }
 
-######################################
-# Verification to run as root
-#
-if test "$(/usr/bin/id -u 2>/dev/null)" -ne 0; then
-    echo "${SCRIPTNAME}: Error: You must be user root to run \"${SCRIPTNAME}\"!"
-    exit 1
-fi
 
 #######################################
-# Parsing the command line
+# Parsing the command line and pre checks
 #
 paramWORKDIR_BASE="/tmp/"
 
@@ -90,7 +83,14 @@ while [ ${#} -gt 0 ]; do
 	    ;;
 	--directory|-d)
 	    paramWORKDIR_BASE=${2}
-	    shift
+	    if test -z "${paramWORKDIR_BASE}"; then
+	        echo "${SCRIPTNAME}: Error: No directory specified for data collection!"
+		echo
+		exit 1
+	    else
+	        # jump to next param, if already last the final shift can do termination
+		shift
+	    fi
 	    ;;
 	-*|--*|*)
 	    echo
@@ -100,17 +100,20 @@ while [ ${#} -gt 0 ]; do
 	    exit 1
 	    ;;
     esac
+    # next parameter
     shift
 done
 
-if test -z "${paramWORKDIR_BASE}"; then
-    echo "${SCRIPTNAME}: Error: No directory specified for data collection!"
-    echo
-    exit 1
-fi
+# check for a valid path
 if test ! -d "${paramWORKDIR_BASE}"; then
     echo "${SCRIPTNAME}: Error: The specified directory \"${paramWORKDIR_BASE}\" does not exist!"
     echo
+    exit 1
+fi
+
+# finally verification to run as root
+if test "$(/usr/bin/id -u 2>/dev/null)" -ne 0; then
+    echo "${SCRIPTNAME}: Error: You must be user root to run \"${SCRIPTNAME}\"!"
     exit 1
 fi
 
@@ -188,20 +191,17 @@ readonly OUTPUT_FILE_JOURNALCTL="${WORKPATH}journalctl.out"
 # File that includes the output of OpenVSwitch
 readonly OUTPUT_FILE_OVS="${WORKPATH}openvswitch"
 
-# File that includes the KVM domain xml file
-readonly OUTPUT_FILE_XML="${WORKPATH}domain_xml"
-
 # File that includes the docker inspect output
 readonly OUTPUT_FILE_DOCKER="${WORKPATH}docker_inspect.out"
 
 # File that includes nvme related information
 readonly OUTPUT_FILE_NVME="${WORKPATH}nvme.out"
 
+# File that includes KVM related information
+readonly OUTPUT_FILE_KVM="${WORKPATH}kvm_runtime.out"
+
 # Mount point of the debug file system
 readonly MOUNT_POINT_DEBUGFS="/sys/kernel/debug"
-
-# The amount of steps running the whole collections
-readonly COLLECTION_COUNT=15
 
 # The kernel version (e.g. '2' from 2.6.32 or '3' from 3.2.1)
 readonly KERNEL_VERSION=$(uname -r 2>/dev/null | cut -d'.' -f1)
@@ -236,6 +236,29 @@ else
     readonly RUNTIME_ENVIRONMENT="LPAR"
 fi
 
+# define order of collection steps
+ALL_STEPS="\
+ collect_cmdsout\
+ collect_vmcmdsout\
+ collect_procfs\
+ collect_sysfs\
+ collect_logfiles\
+ collect_configfiles\
+ collect_osaoat\
+ collect_ethtool\
+ collect_tc\
+ collect_bridge\
+ collect_ovs\
+ collect_docker\
+ collect_nvme\
+ collect_kvm\
+ post_processing\
+ create_package\
+ environment_cleanup\
+ "
+
+# The amount of steps running the whole collections, without last cleanup
+readonly COLLECTION_COUNT=`expr $(echo ${ALL_STEPS} | wc -w) - 1`
 
 ########################################
 
@@ -253,6 +276,7 @@ PROCFILES="\
   /proc/driver/z90crypt\
   /proc/interrupts\
   /proc/iomem\
+  /proc/kallsyms\
   /proc/mdstat\
   /proc/meminfo\
   /proc/misc\
@@ -260,6 +284,7 @@ PROCFILES="\
   /proc/mounts\
   /proc/net/vlan\
   /proc/net/bonding\
+  /proc/net/softnet_stat\
   /proc/partitions\
   /proc/qeth\
   /proc/qeth_perf\
@@ -268,6 +293,7 @@ PROCFILES="\
   /proc/schedstat\
   /proc/service_levels\
   /proc/slabinfo\
+  /proc/softirqs\
   /proc/stat\
   /proc/swaps\
   /proc/sys/kernel\
@@ -316,10 +342,10 @@ LOGFILES="\
   /var/log/IBMtape.trace\
   /var/log/IBMtape.errorlog\
   /var/log/libvirt\
+  /sys/module/kvm/parameters\
   /var/log/lin_tape.trace\
   /var/log/lin_tape.errorlog\
   /var/log/messages*\
-  /var/log/opencryptoki\
   /var/log/syslog*\
   /var/log/sa\
   /var/log/yum.log\
@@ -385,7 +411,6 @@ CONFIGFILES="\
   "
 
 ########################################
-
 CMDS="uname -a\
   :uptime\
   :runlevel\
@@ -434,12 +459,13 @@ CMDS="uname -a\
   :lschp\
   :lscss\
   :lscpu -ae\
+  :lscpu -ye\
   :lsmem\
   :lsdasd\
   :lsdasd -u\
   :ziorep_config -ADM\
   :lsmod\
-  :lsdev\
+  :lszdev\
   :lsscsi\
   :lstape\
   :lszfcp\
@@ -487,7 +513,6 @@ CMDS="uname -a\
   "
 
 ########################################
-
 VM_CMDS="q userid\
   :q users\
   :q privclass\
@@ -531,7 +556,7 @@ VM_CMDS="q userid\
   :q lan\
   :q lan all details\
   :q lan all access\
-  :q cache\
+  :q memassist\
   :q nic\
   :q pav\
   :q proc\
@@ -548,11 +573,26 @@ VM_CMDS="q userid\
   :q dumpdev\
   :q reorder VMUSERID\
   :q quickdsp VMUSERID\
+  :q pcifunction\
+  :q vmrelocate\
   :ind load\
   :ind sp\
   :ind user\
+  :qemu-ga -V\
   "
 ###############################################################################
+KVM_CMDS="virsh version\
+  :virsh nodeinfo\
+  :virsh nodememstats\
+  :virsh nodecpustats\
+  :virsh list --all\
+  :virsh iface-list\
+  :virsh net-list\
+  :virsh nwfilter-list\
+  :virsh nodedev-list --tree\
+  :virsh pool-list\
+  :virt-host-validate\
+  "
 
 ########################################
 collect_cmdsout() {
@@ -560,7 +600,7 @@ collect_cmdsout() {
     local ifs_orig
 
     ifs_orig="${IFS}"
-    pr_syslog_stdout "1 of ${COLLECTION_COUNT}: Collecting command output"
+    pr_syslog_stdout "${step_num} Collecting command output"
 
     IFS=:
     for cmd in ${CMDS}; do
@@ -592,7 +632,7 @@ collect_vmcmdsout() {
     ifs_orig="${IFS}"
 
     if echo "${RUNTIME_ENVIRONMENT}" | grep -qi "z/VM" >/dev/null 2>&1; then
-	pr_syslog_stdout "2 of ${COLLECTION_COUNT}: Collecting z/VM command output"
+	pr_syslog_stdout "${step_num} Collecting z/VM command output"
 
 	if which vmcp >/dev/null 2>&1; then
 	    cp_command="vmcp"
@@ -637,7 +677,7 @@ collect_vmcmdsout() {
 	    rmmod vmcp
 	fi
     else
-	pr_syslog_stdout "2 of ${COLLECTION_COUNT}: Collecting z/VM command output skipped - no z/VM environment"
+	pr_syslog_stdout "${step_num} Collecting z/VM command output skipped - no z/VM environment"
     fi
 
     pr_log_stdout " "
@@ -648,7 +688,7 @@ collect_vmcmdsout() {
 collect_procfs() {
     local file_name
 
-    pr_syslog_stdout "3 of ${COLLECTION_COUNT}: Collecting procfs"
+    pr_syslog_stdout "${step_num} Collecting procfs"
 
     for file_name in ${PROCFILES}; do
 	call_collect_file "${file_name}"
@@ -667,7 +707,7 @@ collect_sysfs() {
     debugfs_mounted=0
     # Requires kernel version newer then 2.4
     if test "${LINUX_SUPPORT_SYSFS}" -eq 0; then
-	pr_syslog_stdout "4 of ${COLLECTION_COUNT}: Collecting sysfs"
+	pr_syslog_stdout "${step_num} Collecting sysfs"
 	# Requires kernel version of 2.6.13 or newer
 	if test "${LINUX_SUPPORT_SYSFSDBF}" -eq 0; then
 	    if ! grep -qE "${MOUNT_POINT_DEBUGFS}.*debugfs" /proc/mounts 2>/dev/null; then
@@ -708,7 +748,7 @@ collect_sysfs() {
 	    umount "${MOUNT_POINT_DEBUGFS}"
 	fi
     else
-	pr_syslog_stdout "4 of ${COLLECTION_COUNT}: Collecting sysfs skipped. Kernel $(uname -r) must be newer than 2.4"
+	pr_syslog_stdout "${step_num} Collecting sysfs skipped. Kernel $(uname -r) must be newer than 2.4"
     fi
 
     pr_log_stdout " "
@@ -719,7 +759,7 @@ collect_sysfs() {
 collect_logfiles() {
     local file_name
 
-    pr_syslog_stdout "5 of ${COLLECTION_COUNT}: Collecting log files"
+    pr_syslog_stdout "${step_num} Collecting log files"
 
     for file_name in ${LOGFILES}; do
 	call_collect_file "${file_name}"
@@ -733,7 +773,7 @@ collect_logfiles() {
 collect_configfiles() {
     local file_name
 
-    pr_syslog_stdout "6 of ${COLLECTION_COUNT}: Collecting config files"
+    pr_syslog_stdout "${step_num} Collecting config files"
 
     for file_name in ${CONFIGFILES}; do
 	call_collect_file "${file_name}"
@@ -752,16 +792,16 @@ collect_osaoat() {
                      | sed 's/.*:[[:space:]]\+\([^[:space:]]*\)[[:space:]]\+/\1/g')
     if which qethqoat >/dev/null 2>&1; then
 	if test -n "${network_devices}"; then
-	    pr_syslog_stdout "7 of ${COLLECTION_COUNT}: Collecting osa oat output"
+	    pr_syslog_stdout "${step_num} Collecting osa oat output"
 	    for network_device in ${network_devices}; do
 		call_run_command "qethqoat ${network_device}" "${OUTPUT_FILE_OSAOAT}.out" &&
 		call_run_command "qethqoat -r ${network_device}" "${OUTPUT_FILE_OSAOAT}_${network_device}.raw"
 	    done
 	else
-	    pr_syslog_stdout "7 of ${COLLECTION_COUNT}: Collecting osa oat output skipped - no devices"
+	    pr_syslog_stdout "${step_num} Collecting osa oat output skipped - no devices"
 	fi
     else
-	pr_syslog_stdout "7 of ${COLLECTION_COUNT}: Collecting osa oat output skipped - not available"
+	pr_syslog_stdout "${step_num} Collecting osa oat output skipped - not available"
     fi
 
     pr_log_stdout " "
@@ -775,12 +815,13 @@ collect_ethtool() {
     network_devices=$(ls /sys/class/net 2>/dev/null)
     if which ethtool >/dev/null 2>&1; then
 	if test -n "${network_devices}"; then
-	    pr_syslog_stdout "8 of ${COLLECTION_COUNT}: Collecting ethtool output"
+	    pr_syslog_stdout "${step_num} Collecting ethtool output"
 	    for network_device in ${network_devices}; do
 		call_run_command "ethtool ${network_device}" "${OUTPUT_FILE_ETHTOOL}"
 		call_run_command "ethtool -k ${network_device}" "${OUTPUT_FILE_ETHTOOL}"
 		call_run_command "ethtool -a ${network_device}" "${OUTPUT_FILE_ETHTOOL}"
 		call_run_command "ethtool -c ${network_device}" "${OUTPUT_FILE_ETHTOOL}"
+		call_run_command "ethtool --per-queue ${network_device} --show-coalesce" "${OUTPUT_FILE_ETHTOOL}"
 		call_run_command "ethtool -g ${network_device}" "${OUTPUT_FILE_ETHTOOL}"
 		call_run_command "ethtool -i ${network_device}" "${OUTPUT_FILE_ETHTOOL}"
 		call_run_command "ethtool -l ${network_device}" "${OUTPUT_FILE_ETHTOOL}"
@@ -789,10 +830,10 @@ collect_ethtool() {
 		call_run_command "ethtool -T ${network_device}" "${OUTPUT_FILE_ETHTOOL}"
 	    done
 	else
-	    pr_syslog_stdout "8 of ${COLLECTION_COUNT}: Collecting ethtool output skipped - no devices"
+	    pr_syslog_stdout "${step_num} Collecting ethtool output skipped - no devices"
 	fi
     else
-	pr_syslog_stdout "8 of ${COLLECTION_COUNT}: Collecting ethtool output skipped - not available"
+	pr_syslog_stdout "${step_num} Collecting ethtool output skipped - not available"
     fi
 
     pr_log_stdout " "
@@ -806,15 +847,15 @@ collect_tc() {
     network_devices=$(ls /sys/class/net 2>/dev/null)
     if which tc >/dev/null 2>&1; then
 	if test -n "${network_devices}"; then
-	    pr_syslog_stdout "9 of ${COLLECTION_COUNT}: Collecting tc output"
+	    pr_syslog_stdout "${step_num} Collecting tc output"
 	    for network_device in ${network_devices}; do
 		call_run_command "tc -s qdisc show dev ${network_device}" "${OUTPUT_FILE_TC}"
 	    done
 	else
-	    pr_syslog_stdout "9 of ${COLLECTION_COUNT}: Collecting tc output skipped - no devices"
+	    pr_syslog_stdout "${step_num} Collecting tc output skipped - no devices"
 	fi
     else
-	pr_syslog_stdout "9 of ${COLLECTION_COUNT}: Collecting tc output skipped - not available"
+	pr_syslog_stdout "${step_num} Collecting tc output skipped - not available"
     fi
 
     pr_log_stdout " "
@@ -828,17 +869,17 @@ collect_bridge() {
     network_devices=$(ls /sys/class/net 2>/dev/null)
     if which bridge >/dev/null 2>&1; then
 	if test -n "${network_devices}"; then
-	    pr_syslog_stdout "10 of ${COLLECTION_COUNT}: Collecting bridge output"
+	    pr_syslog_stdout "${step_num} Collecting bridge output"
 	    for network_device in ${network_devices}; do
 		call_run_command "bridge -d link show dev ${network_device}" "${OUTPUT_FILE_BRIDGE}"
 		call_run_command "bridge -s fdb show dev ${network_device}" "${OUTPUT_FILE_BRIDGE}"
 		call_run_command "bridge -d mdb show dev ${network_device}" "${OUTPUT_FILE_BRIDGE}"
 	    done
 	else
-	    pr_syslog_stdout "10 of ${COLLECTION_COUNT}: Collecting bridge output skipped - no devices"
+	    pr_syslog_stdout "${step_num} Collecting bridge output skipped - no devices"
 	fi
     else
-	pr_syslog_stdout "10 of ${COLLECTION_COUNT}: Collecting bridge output skipped - not available"
+	pr_syslog_stdout "${step_num} Collecting bridge output skipped - not available"
     fi
 
     pr_log_stdout " "
@@ -860,7 +901,7 @@ collect_ovs() {
             :ovsdb-client dump\
             "
     if test -n "${br_list}"; then
-        pr_syslog_stdout "11 of ${COLLECTION_COUNT}: Collecting OpenVSwitch output"
+        pr_syslog_stdout "${step_num} Collecting OpenVSwitch output"
         IFS=:
           for ovscmd in ${ovscmds}; do
             IFS=${ifs_orig} call_run_command "${ovscmd}" "${OUTPUT_FILE_OVS}.out"
@@ -879,25 +920,7 @@ collect_ovs() {
          IFS="${ifs_orig}"
         done
     else
-        pr_syslog_stdout "11 of ${COLLECTION_COUNT}: Collecting OpenVSwitch output skipped"
-    fi
-
-    pr_log_stdout " "
-}
-
-########################################
-collect_domain_xml() {
-    local domain_list
-    local domain
-
-    domain_list=$(virsh list --all --name)
-    if test -n "${domain_list}"; then
-        pr_syslog_stdout "12 of ${COLLECTION_COUNT}: Collecting domain xml files"
-	  for domain in ${domain_list}; do
-	    call_run_command "virsh dumpxml ${domain}" "${OUTPUT_FILE_XML}_${domain}.xml"
-          done
-    else
-        pr_syslog_stdout "12 of ${COLLECTION_COUNT}: Collecting domain xml files skipped"
+        pr_syslog_stdout "${step_num} Collecting OpenVSwitch output skipped"
     fi
 
     pr_log_stdout " "
@@ -911,23 +934,23 @@ collect_docker() {
     # call docker inspect for all containers
     item_list=$(docker ps -qa)
     if test -n "${item_list}"; then
-        pr_syslog_stdout "13a of ${COLLECTION_COUNT}: Collecting docker container output"
+        pr_syslog_stdout "${current_step}a of ${COLLECTION_COUNT}: Collecting docker container output"
         for item in ${item_list}; do
             call_run_command "docker inspect ${item}" "${OUTPUT_FILE_DOCKER}"
         done
     else
-        pr_syslog_stdout "13a of ${COLLECTION_COUNT}: Collecting docker container output skipped"
+        pr_syslog_stdout "${current_step}a of ${COLLECTION_COUNT}: Collecting docker container output skipped"
     fi
 
     # call docker inspect for all networks
     item_list=$(docker network ls -q)
     if test -n "${item_list}"; then
-        pr_syslog_stdout "13b of ${COLLECTION_COUNT}: Collecting docker network output"
+        pr_syslog_stdout "${current_step}b of ${COLLECTION_COUNT}: Collecting docker network output"
         for item in ${item_list}; do
             call_run_command "docker network inspect ${item}" "${OUTPUT_FILE_DOCKER}"
         done
     else
-        pr_syslog_stdout "13b of ${COLLECTION_COUNT}: Collecting docker network output skipped"
+        pr_syslog_stdout "${current_step}b of ${COLLECTION_COUNT}: Collecting docker network output skipped"
     fi
 
     pr_log_stdout " "
@@ -937,7 +960,7 @@ collect_docker() {
 collect_nvme() {
     local NVME
 
-    pr_syslog_stdout "14 of ${COLLECTION_COUNT}: Collecting nvme output"
+    pr_syslog_stdout "${step_num} Collecting nvme output"
     call_run_command "nvme list" "${OUTPUT_FILE_NVME}"
 
     for NVME in /dev/nvme[0-9]*; do
@@ -953,13 +976,49 @@ collect_nvme() {
 }
 
 ########################################
+collect_kvm() {
+    local cmd
+    local ifs_orig
+    local domain_list
+    local domain
+
+    # check if KVM virsh command exists
+    if type virsh >/dev/null 2>&1;
+    then
+        pr_syslog_stdout "${step_num} Collecting KVM data"
+        ifs_orig="${IFS}"
+	IFS=:
+	for cmd in ${KVM_CMDS}; do
+            IFS=${ifs_orig} call_run_command "${cmd}" "${OUTPUT_FILE_KVM}"
+	done
+	IFS="${ifs_orig}"
+
+	# domain/guest specific commands
+        domain_list=$(virsh list --all --name)
+        if test -n "${domain_list}"; then
+	  for domain in ${domain_list}; do
+	    call_run_command "virsh dominfo ${domain}" "${OUTPUT_FILE_KVM}"
+	    call_run_command "virsh domblklist ${domain}" "${OUTPUT_FILE_KVM}"
+	    call_run_command "virsh domstats ${domain}" "${OUTPUT_FILE_KVM}"
+          done
+	else
+	  echo "no KVM doamins found" | tee -a ${OUTPUT_FILE_KVM}
+        fi
+    else
+        pr_syslog_stdout "${step_num} Skip KVM data - no virsh command"
+    fi
+
+    pr_log_stdout " "
+}
+
+########################################
 post_processing() {
     local file_mtime
     local file_mtime_epoche
     local tmp_file
     local file_name
 
-    pr_syslog_stdout "${COLLECTION_COUNT} of ${COLLECTION_COUNT}: Postprocessing"
+    pr_syslog_stdout "${step_num} Postprocessing"
 
     find "${WORKPATH}etc/libvirt/qemu/" -maxdepth 1 -name "*.xml" 2>/dev/null | while IFS= read -r file_name; do
 	file_mtime_epoche=$(stat --format=%Y "${file_name}")
@@ -1006,6 +1065,22 @@ post_processing() {
         touch --time=mtime -t "${file_mtime}" "${file_name}"
     done
 
+    find "${WORKPATH}proc/" -name "kallsyms" 2>/dev/null | while IFS= read -r file_name; do
+        tmp_file=${file_name}-`uname -r`.tgz
+        ch_dir="${WORKPATH}proc/"
+        orig_file="kallsyms"
+
+
+        echo " ${file_name}"
+        if ! test -e "${file_name}"; then
+            echo "${SCRIPTNAME}: Warning: Postprocessing failed on ${file_name}"
+            echo
+        fi
+
+        tar -cvzf "${tmp_file}" -C "${ch_dir}" "${orig_file}"
+        rm -f  "${file_name}"
+
+    done
 
     pr_log_stdout " "
 }
@@ -1119,9 +1194,11 @@ environment_setup()
 create_package()
 {
     local rc_tar
-    pr_stdout "Finalizing: Creating archive with collected data"
+    pr_stdout "${step_num} Finalizing: Creating archive with collected data"
     cd "${WORKDIR_BASE}"
 
+    touch "${WORKARCHIVE}"
+    chmod 0600 "${WORKARCHIVE}"
     tar -czf "${WORKARCHIVE}" "${WORKDIR_CURRENT}"
     rc_tar=$?
     if [ $rc_tar -eq 0 ]; then
@@ -1228,41 +1305,16 @@ pr_log_stdout ""
 
 logger -t "${SCRIPTNAME}" "Starting data collection"
 
-collect_cmdsout
-
-collect_vmcmdsout
-
-# Collecting the proc file system (content is specific based on kernel version)
-collect_procfs
-
-# Collecting sysfs in case we run on Kernel 2.4 or newer
-collect_sysfs
-
-collect_logfiles
-
-collect_configfiles
-
-collect_osaoat
-
-collect_ethtool
-
-collect_tc
-
-collect_bridge
-
-collect_ovs
-
-collect_domain_xml
-
-collect_docker
-
-collect_nvme
-
-post_processing
-
-create_package
-
-environment_cleanup
+# step counter
+current_step=1
+# run all collection steps
+for step in ${ALL_STEPS}; do
+  # generate step numbering
+  step_num="${current_step} of ${COLLECTION_COUNT}: "
+  # calling step procedure
+  ${step}
+  current_step=`expr ${current_step} + 1`
+done
 
 logger -t "${SCRIPTNAME}" "Data collection completed"
 
